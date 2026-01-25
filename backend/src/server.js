@@ -7,6 +7,7 @@ const webpush = require('web-push');
 const { getCandles, getUsdtPerpetualMarkets } = require('./binance');
 const { calculateIndicators } = require('./indicators');
 const { predictNextMove } = require('./ai');
+const { executeTrade, closePosition, getStatus: getTradingStatus, TRADING_ENABLED, MIN_CONFIDENCE } = require('./trading');
 
 const PORT = Number(process.env.PORT || 5000);
 const POLL_MS = Number(process.env.POLL_MS || 15_000);
@@ -122,6 +123,17 @@ app.post('/api/tracking', async (req, res) => {
   res.json({ symbols: trackedSymbols, intervals: trackedIntervals });
 });
 
+// Trading endpoints
+app.get('/api/trading/status', (_req, res) => {
+  res.json(getTradingStatus());
+});
+
+app.post('/api/trading/close/:symbol', async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  const result = await closePosition(symbol, 'API request');
+  res.json(result);
+});
+
 server.listen(PORT, () => {
   console.log(`Backend listening on http://localhost:${PORT}`);
 });
@@ -142,6 +154,18 @@ async function pollSymbol(symbol, interval) {
 
       if (ai.confidence >= 0.7) {
         sendPushNotification(`${symbol}: ${signal.signal}`, buildPushBody(signal));
+      }
+
+      // Auto-execute trade if enabled and meets criteria
+      if (TRADING_ENABLED && ai.confidence >= MIN_CONFIDENCE && ai.trade) {
+        const tradeResult = await executeTrade(signal);
+        if (tradeResult.executed) {
+          io.emit('trade', { type: 'OPENED', ...tradeResult.order });
+          sendPushNotification(
+            `TRADE: ${signal.ai.trade.type} ${symbol}`,
+            `Entry: ${signal.ai.trade.entry} | SL: ${tradeResult.order.stopLoss} | TP: ${tradeResult.order.takeProfit}`
+          );
+        }
       }
     } else {
       latestSignals.set(key, {
