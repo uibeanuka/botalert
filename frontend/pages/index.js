@@ -86,6 +86,16 @@ export default function Home() {
     <>
       <Head>
         <title>Binance Futures AI Alerts</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+        <meta name="description" content="Real-time Binance Futures AI trading signals" />
+        <meta name="theme-color" content="#0b1220" />
+
+        {/* iOS PWA */}
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+        <meta name="apple-mobile-web-app-title" content="FuturesAI" />
+        <link rel="apple-touch-icon" href="/icon-192.png" />
+
         <link rel="manifest" href="/manifest.json" />
       </Head>
       <main style={{ padding: '20px', maxWidth: 1200, margin: '0 auto' }}>
