@@ -88,8 +88,36 @@ function calculateIndicators(candles) {
   // Candlestick patterns
   const patterns = detectPatterns(candles);
 
+  // === PREDICTIVE/SNIPER FEATURES ===
+
+  // 1. Divergence Detection (early reversal signals)
+  const divergence = detectDivergence(closes, rsiSeries, macdSeries);
+
+  // 2. Volume Accumulation Detection (smart money moving before price)
+  const volumeAccumulation = detectVolumeAccumulation(candles, volumes, avgVolume);
+
+  // 3. Early Breakout Detection (price building pressure near key levels)
+  const earlyBreakout = detectEarlyBreakout(candles, support, resistance, atr, volumeRatio);
+
+  // 4. Momentum Building Detection
+  const momentumBuilding = detectMomentumBuilding(closes, rsiSeries, macdSeries, volumes);
+
+  // 5. Squeeze Detection (low volatility before big move)
+  const squeeze = detectSqueeze(bollinger, atr, closes);
+
+  // Combine into sniper signals
+  const sniperSignals = {
+    divergence,
+    volumeAccumulation,
+    earlyBreakout,
+    momentumBuilding,
+    squeeze,
+    // Overall sniper score (0-100)
+    score: calculateSniperScore(divergence, volumeAccumulation, earlyBreakout, momentumBuilding, squeeze)
+  };
+
   // Momentum score
-  const momentumScore = buildScore({ rsi, macd, kdj, volumeSpike, breakout, trend });
+  const momentumScore = buildScore({ rsi, macd, kdj, volumeSpike, breakout, trend, sniperSignals });
 
   // Calculate trade levels
   const tradeLevels = calculateTradeLevels({
@@ -117,7 +145,306 @@ function calculateIndicators(candles) {
     breakout,
     patterns,
     momentumScore,
-    tradeLevels
+    tradeLevels,
+    // New predictive features
+    sniperSignals
+  };
+}
+
+// === PREDICTIVE/SNIPER DETECTION FUNCTIONS ===
+
+// Detect RSI and MACD divergence (price vs indicator disagreement = early reversal)
+function detectDivergence(closes, rsiSeries, macdSeries) {
+  if (closes.length < 20 || rsiSeries.length < 10) {
+    return { type: null, strength: 0 };
+  }
+
+  const lookback = 10;
+  const recentCloses = closes.slice(-lookback);
+  const recentRSI = rsiSeries.slice(-lookback);
+  const recentMACD = macdSeries.slice(-lookback);
+
+  let divergenceType = null;
+  let strength = 0;
+  const reasons = [];
+
+  // Find price highs/lows
+  const priceHigh1 = Math.max(...recentCloses.slice(0, 5));
+  const priceHigh2 = Math.max(...recentCloses.slice(5));
+  const priceLow1 = Math.min(...recentCloses.slice(0, 5));
+  const priceLow2 = Math.min(...recentCloses.slice(5));
+
+  // Find RSI highs/lows
+  const rsiHigh1 = Math.max(...recentRSI.slice(0, 5));
+  const rsiHigh2 = Math.max(...recentRSI.slice(5));
+  const rsiLow1 = Math.min(...recentRSI.slice(0, 5));
+  const rsiLow2 = Math.min(...recentRSI.slice(5));
+
+  // Bearish Divergence: Price makes higher high, RSI makes lower high
+  if (priceHigh2 > priceHigh1 && rsiHigh2 < rsiHigh1) {
+    divergenceType = 'bearish';
+    strength += 40;
+    reasons.push('RSI bearish divergence');
+  }
+
+  // Bullish Divergence: Price makes lower low, RSI makes higher low
+  if (priceLow2 < priceLow1 && rsiLow2 > rsiLow1) {
+    divergenceType = 'bullish';
+    strength += 40;
+    reasons.push('RSI bullish divergence');
+  }
+
+  // Check MACD divergence too
+  if (recentMACD.length >= 10) {
+    const macdVals = recentMACD.map(m => m?.MACD || 0);
+    const macdHigh1 = Math.max(...macdVals.slice(0, 5));
+    const macdHigh2 = Math.max(...macdVals.slice(5));
+    const macdLow1 = Math.min(...macdVals.slice(0, 5));
+    const macdLow2 = Math.min(...macdVals.slice(5));
+
+    if (priceHigh2 > priceHigh1 && macdHigh2 < macdHigh1) {
+      if (divergenceType === 'bearish') strength += 20; // Confirms RSI
+      else { divergenceType = 'bearish'; strength += 30; }
+      reasons.push('MACD bearish divergence');
+    }
+
+    if (priceLow2 < priceLow1 && macdLow2 > macdLow1) {
+      if (divergenceType === 'bullish') strength += 20; // Confirms RSI
+      else { divergenceType = 'bullish'; strength += 30; }
+      reasons.push('MACD bullish divergence');
+    }
+  }
+
+  return { type: divergenceType, strength: Math.min(strength, 100), reasons };
+}
+
+// Detect volume accumulation before price moves (smart money entering)
+function detectVolumeAccumulation(candles, volumes, avgVolume) {
+  if (candles.length < 10) {
+    return { detected: false, direction: null, strength: 0 };
+  }
+
+  const recent = candles.slice(-10);
+  const recentVolumes = volumes.slice(-10);
+
+  // Check if volume is increasing while price is relatively flat
+  const priceChange = Math.abs(recent.at(-1).close - recent[0].close) / recent[0].close;
+  const volumeIncrease = recentVolumes.slice(-3).reduce((a, b) => a + b, 0) / 3 / avgVolume;
+
+  let detected = false;
+  let direction = null;
+  let strength = 0;
+
+  // Volume increasing (1.5x+ avg) but price barely moving (<1%) = accumulation
+  if (volumeIncrease > 1.5 && priceChange < 0.01) {
+    detected = true;
+    strength = Math.min((volumeIncrease - 1) * 50, 80);
+
+    // Determine direction by analyzing buy/sell pressure
+    const buyVolume = recent.filter(c => c.close > c.open).reduce((acc, c) => acc + c.volume, 0);
+    const sellVolume = recent.filter(c => c.close < c.open).reduce((acc, c) => acc + c.volume, 0);
+
+    if (buyVolume > sellVolume * 1.3) {
+      direction = 'bullish';
+      strength += 10;
+    } else if (sellVolume > buyVolume * 1.3) {
+      direction = 'bearish';
+      strength += 10;
+    }
+  }
+
+  // Volume spike with price direction = confirmation of move starting
+  if (volumeIncrease > 2 && priceChange > 0.005) {
+    const lastCandle = recent.at(-1);
+    if (lastCandle.close > lastCandle.open) {
+      detected = true;
+      direction = 'bullish';
+      strength = Math.min(volumeIncrease * 30, 90);
+    } else {
+      detected = true;
+      direction = 'bearish';
+      strength = Math.min(volumeIncrease * 30, 90);
+    }
+  }
+
+  return { detected, direction, strength: Math.min(strength, 100) };
+}
+
+// Detect early breakout signals (price approaching key levels with momentum)
+function detectEarlyBreakout(candles, support, resistance, atr, volumeRatio) {
+  if (candles.length < 5 || !support || !resistance) {
+    return { type: null, level: null, distance: null, strength: 0 };
+  }
+
+  const currentPrice = candles.at(-1).close;
+  const range = resistance - support;
+  if (range <= 0) return { type: null, level: null, distance: null, strength: 0 };
+
+  const distanceToResistance = (resistance - currentPrice) / currentPrice;
+  const distanceToSupport = (currentPrice - support) / currentPrice;
+  const atrPercent = atr / currentPrice;
+
+  let type = null;
+  let level = null;
+  let strength = 0;
+
+  // Price within 1 ATR of resistance with volume building = potential upside breakout
+  if (distanceToResistance < atrPercent && distanceToResistance > 0) {
+    type = 'approaching_resistance';
+    level = resistance;
+    strength = 40;
+
+    // Higher volume = more likely to break
+    if (volumeRatio > 1.5) strength += 25;
+    if (volumeRatio > 2) strength += 15;
+
+    // Closing near highs = bullish pressure
+    const lastCandle = candles.at(-1);
+    const closePosition = (lastCandle.close - lastCandle.low) / (lastCandle.high - lastCandle.low);
+    if (closePosition > 0.7) strength += 15;
+  }
+
+  // Price within 1 ATR of support with volume = potential downside breakdown
+  if (distanceToSupport < atrPercent && distanceToSupport > 0) {
+    type = 'approaching_support';
+    level = support;
+    strength = 40;
+
+    if (volumeRatio > 1.5) strength += 25;
+    if (volumeRatio > 2) strength += 15;
+
+    // Closing near lows = bearish pressure
+    const lastCandle = candles.at(-1);
+    const closePosition = (lastCandle.close - lastCandle.low) / (lastCandle.high - lastCandle.low);
+    if (closePosition < 0.3) strength += 15;
+  }
+
+  return {
+    type,
+    level,
+    distance: type === 'approaching_resistance' ? distanceToResistance : distanceToSupport,
+    strength: Math.min(strength, 100)
+  };
+}
+
+// Detect momentum building (RSI/MACD starting to move before price catches up)
+function detectMomentumBuilding(closes, rsiSeries, macdSeries, volumes) {
+  if (rsiSeries.length < 5 || macdSeries.length < 5) {
+    return { detected: false, direction: null, strength: 0 };
+  }
+
+  const recentRSI = rsiSeries.slice(-5);
+  const recentMACD = macdSeries.slice(-5);
+  const recentCloses = closes.slice(-5);
+
+  let detected = false;
+  let direction = null;
+  let strength = 0;
+
+  // RSI rising but price flat = bullish momentum building
+  const rsiChange = recentRSI.at(-1) - recentRSI[0];
+  const priceChange = (recentCloses.at(-1) - recentCloses[0]) / recentCloses[0];
+
+  if (rsiChange > 10 && Math.abs(priceChange) < 0.005) {
+    detected = true;
+    direction = 'bullish';
+    strength = Math.min(rsiChange * 3, 60);
+  }
+
+  if (rsiChange < -10 && Math.abs(priceChange) < 0.005) {
+    detected = true;
+    direction = 'bearish';
+    strength = Math.min(Math.abs(rsiChange) * 3, 60);
+  }
+
+  // MACD histogram increasing = momentum building
+  const histograms = recentMACD.map(m => m?.histogram || 0);
+  const histChange = histograms.at(-1) - histograms[0];
+
+  if (histChange > 0 && histograms.at(-1) > 0) {
+    if (direction === 'bullish') strength += 20;
+    else if (!detected) { detected = true; direction = 'bullish'; strength = 40; }
+  }
+
+  if (histChange < 0 && histograms.at(-1) < 0) {
+    if (direction === 'bearish') strength += 20;
+    else if (!detected) { detected = true; direction = 'bearish'; strength = 40; }
+  }
+
+  // Volume increasing with momentum = stronger signal
+  const recentVolumes = volumes.slice(-5);
+  const volumeGrowing = recentVolumes.at(-1) > recentVolumes[0] * 1.2;
+  if (volumeGrowing && detected) strength += 15;
+
+  return { detected, direction, strength: Math.min(strength, 100) };
+}
+
+// Detect squeeze (low volatility compression before explosive move)
+function detectSqueeze(bollinger, atr, closes) {
+  if (!bollinger.upper || !bollinger.lower || closes.length < 20) {
+    return { inSqueeze: false, strength: 0, duration: 0 };
+  }
+
+  const bbWidth = (bollinger.upper - bollinger.lower) / bollinger.middle;
+  const currentPrice = closes.at(-1);
+  const avgPrice = closes.slice(-20).reduce((a, b) => a + b, 0) / 20;
+  const atrPercent = atr / avgPrice;
+
+  // Squeeze = Bollinger Bands narrowing (low volatility)
+  // Typically BB width < 4% and ATR < 2% indicates squeeze
+  const inSqueeze = bbWidth < 0.04 && atrPercent < 0.02;
+
+  let strength = 0;
+  if (inSqueeze) {
+    // Tighter squeeze = stronger signal
+    strength = Math.max(0, (0.04 - bbWidth) * 1000);
+    strength = Math.min(strength, 80);
+  }
+
+  return { inSqueeze, strength, bbWidth: round(bbWidth * 100, 2) };
+}
+
+// Calculate overall sniper score
+function calculateSniperScore(divergence, volumeAccumulation, earlyBreakout, momentumBuilding, squeeze) {
+  let score = 0;
+  let direction = null;
+  const signals = [];
+
+  if (divergence.type) {
+    score += divergence.strength * 0.3;
+    direction = divergence.type;
+    signals.push(`Divergence: ${divergence.type}`);
+  }
+
+  if (volumeAccumulation.detected) {
+    score += volumeAccumulation.strength * 0.25;
+    if (!direction) direction = volumeAccumulation.direction;
+    signals.push(`Volume accumulation: ${volumeAccumulation.direction}`);
+  }
+
+  if (earlyBreakout.type) {
+    score += earlyBreakout.strength * 0.2;
+    const breakoutDir = earlyBreakout.type === 'approaching_resistance' ? 'bullish' : 'bearish';
+    if (!direction) direction = breakoutDir;
+    signals.push(`Early breakout: ${earlyBreakout.type}`);
+  }
+
+  if (momentumBuilding.detected) {
+    score += momentumBuilding.strength * 0.15;
+    if (!direction) direction = momentumBuilding.direction;
+    signals.push(`Momentum building: ${momentumBuilding.direction}`);
+  }
+
+  if (squeeze.inSqueeze) {
+    score += squeeze.strength * 0.1;
+    signals.push('Squeeze detected');
+  }
+
+  return {
+    score: Math.min(Math.round(score), 100),
+    direction,
+    signals,
+    isSniper: score >= 50 // Strong predictive signal
   };
 }
 
@@ -311,7 +638,7 @@ function detectPatterns(candles) {
   return patterns;
 }
 
-function buildScore({ rsi, macd, kdj, volumeSpike, breakout, trend }) {
+function buildScore({ rsi, macd, kdj, volumeSpike, breakout, trend, sniperSignals }) {
   let score = 0;
 
   // RSI contribution (max 20)
@@ -345,6 +672,11 @@ function buildScore({ rsi, macd, kdj, volumeSpike, breakout, trend }) {
     else if (trend.direction === 'UP' || trend.direction === 'DOWN') score += 8;
   }
 
+  // SNIPER SIGNALS BONUS (max 25)
+  if (sniperSignals && sniperSignals.score) {
+    score += Math.min(sniperSignals.score * 0.25, 25);
+  }
+
   return Math.min(score, 100);
 }
 
@@ -354,5 +686,12 @@ module.exports = {
   detectPatterns,
   buildScore,
   findSupportResistance,
-  calculateTradeLevels
+  calculateTradeLevels,
+  // Sniper/Predictive functions
+  detectDivergence,
+  detectVolumeAccumulation,
+  detectEarlyBreakout,
+  detectMomentumBuilding,
+  detectSqueeze,
+  calculateSniperScore
 };

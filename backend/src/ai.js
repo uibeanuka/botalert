@@ -1,4 +1,6 @@
-function predictNextMove(indicators) {
+const { findSimilarPatterns } = require('./patternMemory');
+
+function predictNextMove(indicators, multiTimeframeData = null) {
   if (!indicators) {
     return { direction: 'neutral', confidence: 0.5, explanation: 'No indicators available', signal: 'HOLD' };
   }
@@ -19,7 +21,8 @@ function predictNextMove(indicators) {
     breakout,
     patterns,
     momentumScore,
-    tradeLevels
+    tradeLevels,
+    sniperSignals // NEW: Predictive signals
   } = indicators;
 
   let bullScore = 0;
@@ -166,9 +169,122 @@ function predictNextMove(indicators) {
     }
   }
 
+  // === NEW: SNIPER/PREDICTIVE SIGNALS (weight: 30 points max) ===
+  let sniperBonus = 0;
+  if (sniperSignals) {
+    // Divergence signals (early reversal detection)
+    if (sniperSignals.divergence?.type === 'bullish') {
+      bullScore += Math.min(15, sniperSignals.divergence.strength * 0.15);
+      if (sniperSignals.divergence.strength > 40) {
+        reasons.push('SNIPER: Bullish divergence detected');
+      }
+    } else if (sniperSignals.divergence?.type === 'bearish') {
+      bearScore += Math.min(15, sniperSignals.divergence.strength * 0.15);
+      if (sniperSignals.divergence.strength > 40) {
+        reasons.push('SNIPER: Bearish divergence detected');
+      }
+    }
+
+    // Volume accumulation (smart money moving)
+    if (sniperSignals.volumeAccumulation?.detected) {
+      const dir = sniperSignals.volumeAccumulation.direction;
+      if (dir === 'bullish') {
+        bullScore += Math.min(12, sniperSignals.volumeAccumulation.strength * 0.12);
+        if (sniperSignals.volumeAccumulation.strength > 50) {
+          reasons.push('SNIPER: Bullish volume accumulation');
+        }
+      } else if (dir === 'bearish') {
+        bearScore += Math.min(12, sniperSignals.volumeAccumulation.strength * 0.12);
+        if (sniperSignals.volumeAccumulation.strength > 50) {
+          reasons.push('SNIPER: Bearish volume accumulation');
+        }
+      }
+    }
+
+    // Early breakout detection
+    if (sniperSignals.earlyBreakout?.type === 'approaching_resistance') {
+      bullScore += Math.min(10, sniperSignals.earlyBreakout.strength * 0.1);
+      if (sniperSignals.earlyBreakout.strength > 60) {
+        reasons.push('SNIPER: Building for breakout');
+      }
+    } else if (sniperSignals.earlyBreakout?.type === 'approaching_support') {
+      bearScore += Math.min(10, sniperSignals.earlyBreakout.strength * 0.1);
+      if (sniperSignals.earlyBreakout.strength > 60) {
+        reasons.push('SNIPER: Building for breakdown');
+      }
+    }
+
+    // Momentum building
+    if (sniperSignals.momentumBuilding?.detected) {
+      const dir = sniperSignals.momentumBuilding.direction;
+      if (dir === 'bullish') {
+        bullScore += Math.min(8, sniperSignals.momentumBuilding.strength * 0.08);
+        reasons.push('SNIPER: Bullish momentum building');
+      } else if (dir === 'bearish') {
+        bearScore += Math.min(8, sniperSignals.momentumBuilding.strength * 0.08);
+        reasons.push('SNIPER: Bearish momentum building');
+      }
+    }
+
+    // Squeeze detection (volatility compression before big move)
+    if (sniperSignals.squeeze?.inSqueeze) {
+      sniperBonus += 5; // Adds to confidence, not direction
+      reasons.push('SNIPER: Squeeze - expecting big move');
+    }
+
+    // Track overall sniper score
+    if (sniperSignals.score?.isSniper) {
+      sniperBonus += 5;
+    }
+  }
+
+  // === PATTERN MEMORY BOOST ===
+  let patternMemoryBoost = 0;
+  let patternMatch = null;
+  try {
+    patternMatch = findSimilarPatterns(indicators);
+    if (patternMatch.found && patternMatch.confidenceBoost > 0) {
+      patternMemoryBoost = patternMatch.confidenceBoost;
+      if (patternMatch.isBestPattern) {
+        reasons.push(`LEARNED: High win-rate pattern (${patternMatch.winRate}%)`);
+      }
+
+      // Adjust scores if historical direction is known
+      if (patternMatch.historicalDirection === 'long') {
+        bullScore += 5;
+      } else if (patternMatch.historicalDirection === 'short') {
+        bearScore += 5;
+      }
+    }
+  } catch (e) {
+    // Pattern memory not loaded
+  }
+
+  // === MULTI-TIMEFRAME CONFLUENCE (if provided) ===
+  let mtfBonus = 0;
+  if (multiTimeframeData) {
+    const { higherTimeframe, lowerTimeframe } = multiTimeframeData;
+
+    // Check if higher timeframe agrees with current direction
+    if (higherTimeframe?.direction === 'long' && bullScore > bearScore) {
+      mtfBonus += 10;
+      reasons.push('MTF: Higher timeframe confirms LONG');
+    } else if (higherTimeframe?.direction === 'short' && bearScore > bullScore) {
+      mtfBonus += 10;
+      reasons.push('MTF: Higher timeframe confirms SHORT');
+    }
+
+    // Lower timeframe entry timing
+    if (lowerTimeframe?.signal?.includes('LONG') && bullScore > bearScore) {
+      mtfBonus += 5;
+    } else if (lowerTimeframe?.signal?.includes('SHORT') && bearScore > bullScore) {
+      mtfBonus += 5;
+    }
+  }
+
   // Calculate final scores and direction
   const totalScore = bullScore + bearScore;
-  const maxPossibleScore = 130; // Sum of all max weights
+  const maxPossibleScore = 160; // Updated for sniper signals
 
   let direction = 'neutral';
   let signal = 'HOLD';
@@ -186,6 +302,15 @@ function predictNextMove(indicators) {
       confidence += 0.1;
     }
 
+    // Sniper bonus
+    confidence += sniperBonus / 100;
+
+    // Pattern memory bonus
+    confidence += patternMemoryBoost / 100;
+
+    // Multi-timeframe bonus
+    confidence += mtfBonus / 100;
+
     // Determine direction and signal
     if (bullScore > bearScore) {
       direction = 'long';
@@ -196,6 +321,11 @@ function predictNextMove(indicators) {
           confidence += 0.05;
         }
       }
+      // SNIPER signal upgrade
+      if (sniperSignals?.score?.isSniper && sniperSignals?.score?.direction === 'bullish') {
+        signal = signal === 'HOLD' ? 'SNIPER_LONG' : signal;
+        confidence += 0.03;
+      }
     } else if (bearScore > bullScore) {
       direction = 'short';
       if (bearScore >= 40 && scoreDiff >= 15) {
@@ -205,6 +335,11 @@ function predictNextMove(indicators) {
           confidence += 0.05;
         }
       }
+      // SNIPER signal upgrade
+      if (sniperSignals?.score?.isSniper && sniperSignals?.score?.direction === 'bearish') {
+        signal = signal === 'HOLD' ? 'SNIPER_SHORT' : signal;
+        confidence += 0.03;
+      }
     }
   }
 
@@ -212,24 +347,42 @@ function predictNextMove(indicators) {
   confidence = Math.min(0.95, Math.max(0.1, confidence));
 
   // Build trade recommendation
-  const trade = buildTradeRecommendation(direction, tradeLevels, confidence, signal);
+  const trade = buildTradeRecommendation(direction, tradeLevels, confidence, signal, sniperSignals);
 
   return {
     direction,
     signal,
     confidence: Number(confidence.toFixed(2)),
-    reasons: reasons.slice(0, 5), // Top 5 reasons
+    reasons: reasons.slice(0, 7), // Top 7 reasons (more for sniper)
     scores: {
       bull: bullScore,
       bear: bearScore,
-      momentum: momentumScore || 0
+      momentum: momentumScore || 0,
+      sniper: sniperSignals?.score?.score || 0
     },
-    trade
+    trade,
+    // Include sniper analysis
+    sniperAnalysis: sniperSignals ? {
+      isSniper: sniperSignals.score?.isSniper || false,
+      direction: sniperSignals.score?.direction,
+      signals: sniperSignals.score?.signals || [],
+      divergence: sniperSignals.divergence?.type,
+      squeeze: sniperSignals.squeeze?.inSqueeze
+    } : null,
+    // Pattern memory
+    patternMatch: patternMatch?.found ? {
+      matches: patternMatch.matches,
+      winRate: patternMatch.winRate,
+      isBestPattern: patternMatch.isBestPattern
+    } : null
   };
 }
 
-function buildTradeRecommendation(direction, tradeLevels, confidence, signal) {
-  if (!tradeLevels || signal === 'HOLD') {
+function buildTradeRecommendation(direction, tradeLevels, confidence, signal, sniperSignals) {
+  // Allow trades with SNIPER signals even without standard signals
+  const validSignals = ['LONG', 'SHORT', 'STRONG_LONG', 'STRONG_SHORT', 'SNIPER_LONG', 'SNIPER_SHORT'];
+
+  if (!tradeLevels || (!validSignals.includes(signal) && signal === 'HOLD')) {
     return null;
   }
 
@@ -239,8 +392,9 @@ function buildTradeRecommendation(direction, tradeLevels, confidence, signal) {
     return null;
   }
 
-  // Only recommend trades with decent R:R
-  if (levels.rr < 1.2) {
+  // Lower R:R requirement for sniper signals (they're predictive)
+  const minRR = signal.includes('SNIPER') ? 1.0 : 1.2;
+  if (levels.rr < minRR) {
     return null;
   }
 
@@ -253,6 +407,11 @@ function buildTradeRecommendation(direction, tradeLevels, confidence, signal) {
     positionSize = 'aggressive';
   }
 
+  // Sniper trades can be more aggressive due to early entry
+  if (signal.includes('SNIPER') && confidence >= 0.7) {
+    positionSize = 'normal';
+  }
+
   return {
     type: direction.toUpperCase(),
     entry: levels.entry,
@@ -262,7 +421,8 @@ function buildTradeRecommendation(direction, tradeLevels, confidence, signal) {
     rewardRatio: levels.rr,
     positionSize,
     atr: tradeLevels.atr,
-    atrPercent: tradeLevels.atrPct
+    atrPercent: tradeLevels.atrPct,
+    isSniper: signal.includes('SNIPER')
   };
 }
 
@@ -286,7 +446,7 @@ function filterHighProbability(prediction) {
   // Minimum requirements for a tradeable signal
   const minConfidence = 0.6;
   const minReasons = 2;
-  const validSignals = ['LONG', 'SHORT', 'STRONG_LONG', 'STRONG_SHORT'];
+  const validSignals = ['LONG', 'SHORT', 'STRONG_LONG', 'STRONG_SHORT', 'SNIPER_LONG', 'SNIPER_SHORT'];
 
   return (
     prediction.confidence >= minConfidence &&

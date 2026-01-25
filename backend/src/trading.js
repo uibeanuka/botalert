@@ -1,5 +1,6 @@
 const axios = require('axios');
 const crypto = require('crypto');
+const { recordPattern, getStats: getPatternStats } = require('./patternMemory');
 
 const API_BASE = process.env.BINANCE_API_URL || 'https://fapi.binance.com';
 const API_KEY = process.env.BINANCE_API_KEY || '';
@@ -344,7 +345,7 @@ async function executeTrade(signal) {
   }
 }
 
-async function closePosition(symbol, reason = 'manual') {
+async function closePosition(symbol, reason = 'manual', currentPrice = null) {
   const position = openPositions.get(symbol);
   if (!position) {
     return { closed: false, reason: 'No position found' };
@@ -358,11 +359,36 @@ async function closePosition(symbol, reason = 'manual') {
     const closeSide = position.side === 'LONG' ? 'SELL' : 'BUY';
     await placeMarketOrder(symbol, closeSide, position.quantity);
 
+    // Determine trade result for pattern learning
+    let result = 'breakeven';
+    if (currentPrice && position.entryPrice) {
+      const pnl = position.side === 'LONG'
+        ? (currentPrice - position.entryPrice) / position.entryPrice
+        : (position.entryPrice - currentPrice) / position.entryPrice;
+
+      if (pnl > 0.005) result = 'win'; // > 0.5% profit
+      else if (pnl < -0.005) result = 'loss'; // > 0.5% loss
+    } else if (reason.includes('profit') || reason.includes('TP')) {
+      result = 'win';
+    } else if (reason.includes('SL') || reason.includes('stop')) {
+      result = 'loss';
+    }
+
+    // Record pattern for learning
+    if (position.signal) {
+      try {
+        recordPattern(position.signal, result);
+        console.log(`Pattern recorded for ${symbol}: ${result}`);
+      } catch (e) {
+        // Pattern memory might not be loaded
+      }
+    }
+
     // Remove from tracking
     openPositions.delete(symbol);
 
-    console.log(`Position closed for ${symbol}: ${reason}`);
-    return { closed: true, symbol, reason };
+    console.log(`Position closed for ${symbol}: ${reason} (${result})`);
+    return { closed: true, symbol, reason, result };
   } catch (err) {
     console.error(`Failed to close position for ${symbol}:`, err.message);
     return { closed: false, reason: err.message };
@@ -494,6 +520,13 @@ async function monitorAllPositions(latestSignals) {
 }
 
 function getStatus() {
+  let patternStats = null;
+  try {
+    patternStats = getPatternStats();
+  } catch (e) {
+    // Pattern memory not available
+  }
+
   return {
     enabled: TRADING_ENABLED,
     hasApiKeys: !!(API_KEY && API_SECRET),
@@ -506,7 +539,9 @@ function getStatus() {
     },
     openPositions: Array.from(openPositions.values()),
     dailyTrades: dailyTrades.count,
-    tradeHistory: tradeHistory.slice(-50)
+    tradeHistory: tradeHistory.slice(-50),
+    // Pattern learning stats
+    patternLearning: patternStats
   };
 }
 
