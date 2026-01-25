@@ -246,8 +246,11 @@ async function executeTrade(signal) {
 
   // Get account balance
   const balance = await getAccountBalance();
-  if (!balance || balance < 10) {
-    return { executed: false, reason: 'Insufficient balance' };
+  if (balance === null) {
+    return { executed: false, reason: 'Could not fetch balance - check API keys and IP whitelist' };
+  }
+  if (balance < 10) {
+    return { executed: false, reason: `Insufficient balance: $${balance.toFixed(2)}` };
   }
 
   // Get symbol trading info
