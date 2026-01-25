@@ -19,7 +19,8 @@
       "Bash(gh repo create:*)",
       "Bash(git commit -m \"$\\(cat <<''EOF''\nAdd iOS PWA support\n\n- Add apple-mobile-web-app-capable meta tag\n- Add apple-touch-icon for home screen\n- Add viewport and theme-color meta tags\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(git push)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(ls:*)"
     ]
   }
 }

@@ -41,11 +41,25 @@ async function withFallback(fn) {
   throw lastError;
 }
 
+// Priority symbols that should always be tracked first
+const PRIORITY_SYMBOLS = [
+  'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT',
+  'FARTCOINUSDT', 'PENGUUSDT', 'PIPPINUSDT', 'ASTERUSDT', 'GIGGLEUSDT', 'TRADOORUSDT',
+  'WIFUSDT', 'ORDIUSDT', '1000BONKUSDT', '1000PEPEUSDT', '1000SHIBUSDT', '1000FLOKIUSDT'
+];
+
 async function getFuturesSymbols() {
   const res = await withFallback((client) => client.get('/fapi/v1/exchangeInfo'));
-  return res.data.symbols
+  const allSymbols = res.data.symbols
     .filter((s) => s.contractType === 'PERPETUAL' && s.status === 'TRADING')
     .map((s) => s.symbol);
+
+  // Ensure priority symbols are at the front so they're always included within MAX_SYMBOLS
+  const prioritySet = new Set(PRIORITY_SYMBOLS);
+  const prioritized = PRIORITY_SYMBOLS.filter(s => allSymbols.includes(s));
+  const rest = allSymbols.filter(s => !prioritySet.has(s));
+
+  return [...prioritized, ...rest];
 }
 
 async function getUsdtPerpetualMarkets() {
