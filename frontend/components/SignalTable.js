@@ -1,37 +1,81 @@
-export default function SignalTable({ signals }) {
+export default function SignalTable({ signals, selectedSymbol, onSelectSymbol }) {
+  const sortedSignals = [...signals].sort((a, b) => {
+    const confA = a.ai?.confidence || 0;
+    const confB = b.ai?.confidence || 0;
+    return confB - confA;
+  });
+
   return (
     <div className="card">
-      <h3 style={{ marginTop: 0, marginBottom: 12 }}>Live Signals</h3>
-      <div style={{ maxHeight: 320, overflowY: 'auto' }}>
-        {signals.length === 0 && <p style={{ color: '#9aa3b5' }}>Waiting for signals...</p>}
-        {signals.map((s) => (
-          <div
-            key={`${s.symbol}-${s.interval}-${s.timestamp}`}
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              padding: '10px 0',
-              borderBottom: '1px solid #1f2a44'
-            }}
-          >
-            <div>
-              <div style={{ fontWeight: 700 }}>{s.symbol}</div>
-              <div style={{ fontSize: 12, color: '#8b94a5' }}>
-                {s.interval} · RSI {formatNumber(s.indicators?.rsi)} · MACD {formatNumber(s.indicators?.macd?.histogram)}
-              </div>
-            </div>
-            <div style={{ textAlign: 'right' }}>
-              <span className={`tag ${tagClass(s.signal)}`}>{s.signal}</span>
-              <div style={{ fontSize: 12, color: '#8b94a5' }}>
-                AI {Math.round((s.ai?.confidence || 0) * 100)}%
-              </div>
-            </div>
-          </div>
-        ))}
+      <div className="card-header">
+        <span className="card-title">Signal Feed</span>
+        <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+          {signals.length} active
+        </span>
       </div>
+
+      {signals.length === 0 ? (
+        <div className="empty-state">
+          <div className="spinner"></div>
+          <p style={{ marginTop: '12px' }}>Waiting for signals...</p>
+        </div>
+      ) : (
+        <div className="signal-list">
+          {sortedSignals.slice(0, 50).map((s) => (
+            <div
+              key={`${s.symbol}-${s.interval}-${s.timestamp}`}
+              className={`signal-card ${s.symbol === selectedSymbol ? 'active' : ''}`}
+              onClick={() => onSelectSymbol?.(s.symbol)}
+            >
+              <div className="signal-info">
+                <div>
+                  <div className="signal-symbol">{s.symbol.replace('USDT', '')}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
+                    <span className="signal-interval">{s.interval}</span>
+                    <span style={{ fontSize: '0.6875rem', color: 'var(--text-muted)' }}>
+                      RSI {formatNumber(s.indicators?.rsi)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="signal-meta">
+                <div>
+                  <ConfidenceBar confidence={s.ai?.confidence || 0} />
+                  <div className="confidence-value" style={{ marginTop: '4px' }}>
+                    {Math.round((s.ai?.confidence || 0) * 100)}%
+                  </div>
+                </div>
+                <span className={`tag ${tagClass(s.signal)}`}>
+                  {getSignalIcon(s.signal)} {s.signal}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
+}
+
+function ConfidenceBar({ confidence }) {
+  const percent = Math.min(100, Math.max(0, confidence * 100));
+  const level = confidence >= 0.7 ? 'high' : confidence >= 0.55 ? 'medium' : 'low';
+
+  return (
+    <div className="confidence-bar">
+      <div
+        className={`confidence-fill ${level}`}
+        style={{ width: `${percent}%` }}
+      />
+    </div>
+  );
+}
+
+function getSignalIcon(signal) {
+  if (signal?.includes('LONG') || signal?.includes('UP')) return '↑';
+  if (signal?.includes('SHORT') || signal?.includes('DOWN')) return '↓';
+  return '→';
 }
 
 function tagClass(signal) {
@@ -42,5 +86,5 @@ function tagClass(signal) {
 
 function formatNumber(value) {
   if (value === undefined || value === null) return '–';
-  return Number(value).toFixed(2);
+  return Number(value).toFixed(1);
 }

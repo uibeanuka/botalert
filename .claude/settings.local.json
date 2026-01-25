@@ -18,7 +18,8 @@
       "Bash(git commit -m \"$\\(cat <<''EOF''\nInitial commit: Binance Futures AI Alert System\n\n- Backend: Express.js + Socket.io server with real-time Binance data\n- Frontend: Next.js dashboard with AI signal display\n- Features: RSI, MACD, Bollinger Bands, KDJ indicators\n- AI scoring system for LONG/SHORT predictions\n- Push notifications support\n- Railway deployment configs\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(gh repo create:*)",
       "Bash(git commit -m \"$\\(cat <<''EOF''\nAdd iOS PWA support\n\n- Add apple-mobile-web-app-capable meta tag\n- Add apple-touch-icon for home screen\n- Add viewport and theme-color meta tags\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
-      "Bash(git push)"
+      "Bash(git push)",
+      "Bash(git commit:*)"
     ]
   }
 }
