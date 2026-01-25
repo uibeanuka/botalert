@@ -72,6 +72,17 @@ io.on('connection', (socket) => {
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
+// Get server's outbound IP for Binance API whitelist
+app.get('/api/server-ip', async (_req, res) => {
+  try {
+    const axios = require('axios');
+    const response = await axios.get('https://api.ipify.org?format=json', { timeout: 5000 });
+    res.json({ ip: response.data.ip, note: 'Add this IP to your Binance API whitelist' });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not determine server IP', message: err.message });
+  }
+});
+
 app.get('/api/signals', (_req, res) => {
   res.json({ signals: Array.from(latestSignals.values()) });
 });
