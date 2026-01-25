@@ -8,7 +8,7 @@ const API_SECRET = process.env.BINANCE_API_SECRET || '';
 // Trading configuration
 const TRADING_ENABLED = process.env.TRADING_ENABLED === 'true';
 const RISK_PER_TRADE = Number(process.env.RISK_PER_TRADE || 5) / 100; // 5% default
-const MIN_CONFIDENCE = Number(process.env.MIN_CONFIDENCE || 70) / 100; // 70% default
+const MIN_CONFIDENCE = Number(process.env.MIN_CONFIDENCE || 65) / 100; // 65% default
 const MAX_OPEN_POSITIONS = Number(process.env.MAX_OPEN_POSITIONS || 5);
 const MAX_DAILY_TRADES = Number(process.env.MAX_DAILY_TRADES || 20);
 const LEVERAGE = Number(process.env.LEVERAGE || 10);
@@ -369,6 +369,130 @@ async function closePosition(symbol, reason = 'manual') {
   }
 }
 
+// Smart exit monitoring - checks if open positions should be closed early
+async function monitorPosition(symbol, currentSignal) {
+  const position = openPositions.get(symbol);
+  if (!position) return null;
+
+  const ai = currentSignal?.ai;
+  if (!ai) return null;
+
+  const positionSide = position.side; // 'LONG' or 'SHORT'
+  const signalDirection = ai.direction; // 'long', 'short', or 'neutral'
+  const confidence = ai.confidence || 0;
+  const scores = ai.scores || {};
+
+  let shouldClose = false;
+  let closeReason = '';
+
+  // 1. Signal reversal - most important
+  if (positionSide === 'LONG' && signalDirection === 'short' && confidence >= 0.6) {
+    shouldClose = true;
+    closeReason = `Signal reversed to SHORT (${(confidence * 100).toFixed(0)}% confidence)`;
+  } else if (positionSide === 'SHORT' && signalDirection === 'long' && confidence >= 0.6) {
+    shouldClose = true;
+    closeReason = `Signal reversed to LONG (${(confidence * 100).toFixed(0)}% confidence)`;
+  }
+
+  // 2. Strong opposing momentum
+  if (!shouldClose) {
+    const bullScore = scores.bull || 0;
+    const bearScore = scores.bear || 0;
+
+    if (positionSide === 'LONG' && bearScore > bullScore + 25) {
+      shouldClose = true;
+      closeReason = `Strong bearish momentum (bear: ${bearScore}, bull: ${bullScore})`;
+    } else if (positionSide === 'SHORT' && bullScore > bearScore + 25) {
+      shouldClose = true;
+      closeReason = `Strong bullish momentum (bull: ${bullScore}, bear: ${bearScore})`;
+    }
+  }
+
+  // 3. Check key indicator reversals
+  if (!shouldClose && currentSignal?.indicators) {
+    const { rsi, macd, breakout } = currentSignal.indicators;
+
+    // RSI extreme reversal
+    if (positionSide === 'LONG' && rsi > 75) {
+      shouldClose = true;
+      closeReason = `RSI extremely overbought (${rsi.toFixed(1)}) - taking profit`;
+    } else if (positionSide === 'SHORT' && rsi < 25) {
+      shouldClose = true;
+      closeReason = `RSI extremely oversold (${rsi.toFixed(1)}) - taking profit`;
+    }
+
+    // Breakout against position
+    if (positionSide === 'LONG' && breakout?.direction === 'down') {
+      shouldClose = true;
+      closeReason = 'Breakdown detected - closing LONG';
+    } else if (positionSide === 'SHORT' && breakout?.direction === 'up') {
+      shouldClose = true;
+      closeReason = 'Breakout detected - closing SHORT';
+    }
+
+    // MACD histogram flip
+    if (macd?.histogram !== undefined) {
+      const entrySignal = position.signal?.ai;
+      const entryHistogram = entrySignal?.indicators?.macd?.histogram || 0;
+
+      // Significant MACD flip against position
+      if (positionSide === 'LONG' && entryHistogram > 0 && macd.histogram < -0.5) {
+        shouldClose = true;
+        closeReason = 'MACD histogram flipped bearish';
+      } else if (positionSide === 'SHORT' && entryHistogram < 0 && macd.histogram > 0.5) {
+        shouldClose = true;
+        closeReason = 'MACD histogram flipped bullish';
+      }
+    }
+  }
+
+  // 4. Position age check - close stale trades after 4 hours with no significant movement
+  const positionAge = Date.now() - position.openTime;
+  const fourHours = 4 * 60 * 60 * 1000;
+  if (!shouldClose && positionAge > fourHours && signalDirection === 'neutral') {
+    shouldClose = true;
+    closeReason = 'Position stale (4h+) with neutral signal';
+  }
+
+  if (shouldClose) {
+    console.log(`SMART EXIT: Closing ${symbol} - ${closeReason}`);
+    const result = await closePosition(symbol, closeReason);
+
+    // Update trade history
+    const historyEntry = tradeHistory.find(t => t.symbol === symbol && t.status === 'OPENED');
+    if (historyEntry) {
+      historyEntry.status = 'SMART_EXIT';
+      historyEntry.closeReason = closeReason;
+      historyEntry.closeTime = Date.now();
+    }
+
+    return { closed: true, symbol, reason: closeReason };
+  }
+
+  return { closed: false, symbol, reason: 'Position OK' };
+}
+
+// Monitor all open positions with current signals
+async function monitorAllPositions(latestSignals) {
+  if (!TRADING_ENABLED || openPositions.size === 0) return [];
+
+  const results = [];
+
+  for (const [symbol, position] of openPositions) {
+    // Find the matching signal for this symbol (prefer the interval used to open)
+    const interval = position.signal?.interval || '5m';
+    const signalKey = `${symbol}-${interval}`;
+    const signal = latestSignals.get(signalKey);
+
+    if (signal) {
+      const result = await monitorPosition(symbol, signal);
+      if (result) results.push(result);
+    }
+  }
+
+  return results;
+}
+
 function getStatus() {
   return {
     enabled: TRADING_ENABLED,
@@ -389,6 +513,8 @@ function getStatus() {
 module.exports = {
   executeTrade,
   closePosition,
+  monitorPosition,
+  monitorAllPositions,
   getAccountBalance,
   getOpenPositions,
   getStatus,

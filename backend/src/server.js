@@ -7,7 +7,7 @@ const webpush = require('web-push');
 const { getCandles, getUsdtPerpetualMarkets } = require('./binance');
 const { calculateIndicators } = require('./indicators');
 const { predictNextMove } = require('./ai');
-const { executeTrade, closePosition, getStatus: getTradingStatus, TRADING_ENABLED, MIN_CONFIDENCE } = require('./trading');
+const { executeTrade, closePosition, monitorAllPositions, getStatus: getTradingStatus, TRADING_ENABLED, MIN_CONFIDENCE } = require('./trading');
 
 const PORT = Number(process.env.PORT || 5000);
 const POLL_MS = Number(process.env.POLL_MS || 15_000);
@@ -288,4 +288,25 @@ function schedulePolling() {
       pollers.push(id);
     });
   });
+
+  // Monitor open positions every 30 seconds for smart exits
+  if (TRADING_ENABLED) {
+    const monitorId = setInterval(async () => {
+      try {
+        const results = await monitorAllPositions(latestSignals);
+        for (const result of results) {
+          if (result.closed) {
+            io.emit('trade', { type: 'SMART_EXIT', symbol: result.symbol, reason: result.reason });
+            sendPushNotification(
+              `SMART EXIT: ${result.symbol}`,
+              result.reason
+            );
+          }
+        }
+      } catch (err) {
+        console.error('Position monitoring error:', err.message);
+      }
+    }, 30000);
+    pollers.push(monitorId);
+  }
 }
