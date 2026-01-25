@@ -273,6 +273,61 @@ export default function Home() {
             </div>
           </div>
 
+          {/* Trade Levels Panel */}
+          {selectedSignal?.ai?.trade && (
+            <div className="card trade-levels-card">
+              <div className="card-header">
+                <div className="ai-header">
+                  <div className="ai-icon" style={{ background: selectedSignal.ai.trade.type === 'LONG' ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                    {selectedSignal.ai.trade.type === 'LONG' ? '↑' : '↓'}
+                  </div>
+                  <span className="card-title">{selectedSignal.ai.trade.type} Trade Setup</span>
+                </div>
+                <span className={`tag ${selectedSignal.ai.trade.type === 'LONG' ? 'tag-long' : 'tag-short'}`}>
+                  R:R {selectedSignal.ai.trade.rewardRatio}
+                </span>
+              </div>
+
+              <div className="trade-levels">
+                <div className="trade-level entry">
+                  <span className="trade-level-label">Entry</span>
+                  <span className="trade-level-value">${formatPrice(selectedSignal.ai.trade.entry)}</span>
+                </div>
+                <div className="trade-level stop-loss">
+                  <span className="trade-level-label">Stop Loss</span>
+                  <span className="trade-level-value">${formatPrice(selectedSignal.ai.trade.stopLoss)}</span>
+                  <span className="trade-level-risk">-{selectedSignal.ai.trade.riskPercent}%</span>
+                </div>
+                <div className="trade-level-divider"></div>
+                <div className="trade-level tp">
+                  <span className="trade-level-label">TP1</span>
+                  <span className="trade-level-value">${formatPrice(selectedSignal.ai.trade.takeProfit?.[0])}</span>
+                </div>
+                <div className="trade-level tp">
+                  <span className="trade-level-label">TP2</span>
+                  <span className="trade-level-value">${formatPrice(selectedSignal.ai.trade.takeProfit?.[1])}</span>
+                </div>
+                <div className="trade-level tp">
+                  <span className="trade-level-label">TP3</span>
+                  <span className="trade-level-value">${formatPrice(selectedSignal.ai.trade.takeProfit?.[2])}</span>
+                </div>
+              </div>
+
+              <div className="trade-meta">
+                <div className="trade-meta-item">
+                  <span>ATR</span>
+                  <span>${formatPrice(selectedSignal.ai.trade.atr)} ({selectedSignal.ai.trade.atrPercent}%)</span>
+                </div>
+                <div className="trade-meta-item">
+                  <span>Position</span>
+                  <span className={`position-size ${selectedSignal.ai.trade.positionSize}`}>
+                    {selectedSignal.ai.trade.positionSize?.toUpperCase()}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* AI Reasons for Selected */}
           {selectedSignal?.ai?.reasons?.length > 0 && (
             <div className="card ai-card">
@@ -337,4 +392,11 @@ function getBollingerStatus(pb) {
   if (pb < 0.2) return 'positive';
   if (pb > 0.8) return 'negative';
   return 'neutral';
+}
+
+function formatPrice(value) {
+  if (value === undefined || value === null) return '—';
+  if (value >= 1000) return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (value >= 1) return value.toFixed(4);
+  return value.toFixed(6);
 }

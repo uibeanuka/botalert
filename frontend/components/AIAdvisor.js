@@ -44,9 +44,26 @@ export default function AIAdvisor({ signals }) {
                 </div>
               </div>
 
+              {s.ai?.trade && (
+                <div className="ai-trade-mini">
+                  <div className="ai-trade-row">
+                    <span className="ai-trade-label">Entry</span>
+                    <span className="ai-trade-value">${formatPrice(s.ai.trade.entry)}</span>
+                  </div>
+                  <div className="ai-trade-row">
+                    <span className="ai-trade-label stop">SL</span>
+                    <span className="ai-trade-value stop">${formatPrice(s.ai.trade.stopLoss)}</span>
+                  </div>
+                  <div className="ai-trade-row">
+                    <span className="ai-trade-label tp">TP1</span>
+                    <span className="ai-trade-value tp">${formatPrice(s.ai.trade.takeProfit?.[0])}</span>
+                  </div>
+                </div>
+              )}
+
               {s.ai?.reasons?.length > 0 && (
                 <div className="ai-reasons">
-                  {s.ai.reasons.slice(0, 3).map((reason, i) => (
+                  {s.ai.reasons.slice(0, 2).map((reason, i) => (
                     <span key={i} className="ai-reason">{reason}</span>
                   ))}
                 </div>
@@ -69,4 +86,11 @@ function getTagClass(signal) {
   if (signal?.includes('LONG') || signal?.includes('UP')) return 'tag-long';
   if (signal?.includes('SHORT') || signal?.includes('DOWN')) return 'tag-short';
   return 'tag-neutral';
+}
+
+function formatPrice(value) {
+  if (value === undefined || value === null) return '—';
+  if (value >= 1000) return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (value >= 1) return value.toFixed(4);
+  return value.toFixed(6);
 }
