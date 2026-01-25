@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(npx web-push:*)",
+      "Bash(lsof:*)",
+      "Bash(xargs kill -9)",
+      "Bash(node:*)",
+      "Bash(curl:*)",
+      "Bash(npm run dev:*)",
+      "Bash(railway whoami:*)",
+      "Bash(railway status:*)",
+      "Bash(railway init:*)",
+      "Bash(railway projects:*)",
+      "Bash(railway:*)",
+      "Bash(gh auth status:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nInitial commit: Binance Futures AI Alert System\n\n- Backend: Express.js + Socket.io server with real-time Binance data\n- Frontend: Next.js dashboard with AI signal display\n- Features: RSI, MACD, Bollinger Bands, KDJ indicators\n- AI scoring system for LONG/SHORT predictions\n- Push notifications support\n- Railway deployment configs\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
+    ]
+  }
+}

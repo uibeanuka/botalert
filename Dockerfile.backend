@@ -1,0 +1,11 @@
+FROM node:18-alpine AS base
+WORKDIR /app
+
+# Build context is from repo root, so use backend/ prefix
+COPY backend/package*.json ./
+RUN npm install --production
+
+COPY backend/src ./src
+
+EXPOSE 5000
+CMD ["npm", "start"]
