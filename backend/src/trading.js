@@ -288,11 +288,53 @@ async function executeTrade(signal) {
     // Place market entry order
     const entryOrder = await placeMarketOrder(signal.symbol, side, quantity);
 
-    // Place stop loss order
-    const slOrder = await placeStopLossOrder(signal.symbol, side, quantity, stopLoss);
+    // Place stop loss order with retry logic
+    let slOrder = null;
+    let slAttempts = 0;
+    while (!slOrder && slAttempts < 3) {
+      try {
+        slOrder = await placeStopLossOrder(signal.symbol, side, quantity, stopLoss);
+      } catch (slErr) {
+        slAttempts++;
+        console.warn(`SL placement attempt ${slAttempts} failed:`, slErr.message);
+        if (slAttempts < 3) {
+          await new Promise(r => setTimeout(r, 1000)); // Wait 1s before retry
+        }
+      }
+    }
 
-    // Place take profit order (TP1)
-    const tpOrder = await placeTakeProfitOrder(signal.symbol, side, quantity, takeProfit);
+    // Place take profit order with retry logic
+    let tpOrder = null;
+    let tpAttempts = 0;
+    while (!tpOrder && tpAttempts < 3) {
+      try {
+        tpOrder = await placeTakeProfitOrder(signal.symbol, side, quantity, takeProfit);
+      } catch (tpErr) {
+        tpAttempts++;
+        console.warn(`TP placement attempt ${tpAttempts} failed:`, tpErr.message);
+        if (tpAttempts < 3) {
+          await new Promise(r => setTimeout(r, 1000)); // Wait 1s before retry
+        }
+      }
+    }
+
+    // CRITICAL: If SL failed after all retries, close position immediately for safety
+    if (!slOrder) {
+      console.error(`CRITICAL: SL placement failed for ${signal.symbol} after 3 attempts. Closing position for safety.`);
+      try {
+        const closeSide = side === 'BUY' ? 'SELL' : 'BUY';
+        await placeMarketOrder(signal.symbol, closeSide, quantity);
+        console.log(`Position closed for ${signal.symbol} due to failed SL placement`);
+      } catch (closeErr) {
+        console.error(`EMERGENCY: Could not close position after SL failure:`, closeErr.message);
+      }
+      return { executed: false, reason: 'SL placement failed - position closed for safety' };
+    }
+
+    // If TP failed, log warning but continue (SL is protecting the position)
+    if (!tpOrder) {
+      console.warn(`WARNING: TP placement failed for ${signal.symbol}. Position protected by SL only.`);
+    }
 
     // Track position
     openPositions.set(signal.symbol, {
@@ -303,8 +345,10 @@ async function executeTrade(signal) {
       stopLoss,
       takeProfit,
       entryOrderId: entryOrder.orderId,
-      slOrderId: slOrder.orderId,
-      tpOrderId: tpOrder.orderId,
+      slOrderId: slOrder?.orderId || null,
+      tpOrderId: tpOrder?.orderId || null,
+      hasTP: !!tpOrder,
+      hasSL: !!slOrder,
       openTime: Date.now(),
       signal
     });
@@ -323,10 +367,12 @@ async function executeTrade(signal) {
       confidence: signal.ai.confidence,
       reasons: signal.ai.reasons,
       timestamp: Date.now(),
-      status: 'OPENED'
+      status: 'OPENED',
+      hasSL: !!slOrder,
+      hasTP: !!tpOrder
     });
 
-    console.log(`TRADE EXECUTED: ${trade.type} ${signal.symbol} qty=${quantity} entry=${trade.entry} sl=${stopLoss} tp=${takeProfit}`);
+    console.log(`TRADE EXECUTED: ${trade.type} ${signal.symbol} qty=${quantity} entry=${trade.entry} sl=${stopLoss} tp=${takeProfit} (SL: ${!!slOrder}, TP: ${!!tpOrder})`);
 
     return {
       executed: true,
@@ -336,7 +382,9 @@ async function executeTrade(signal) {
         quantity,
         entryOrderId: entryOrder.orderId,
         stopLoss,
-        takeProfit
+        takeProfit,
+        hasSL: !!slOrder,
+        hasTP: !!tpOrder
       }
     };
   } catch (err) {
@@ -472,6 +520,78 @@ async function monitorPosition(symbol, currentSignal) {
     }
   }
 
+  // === SNIPER SIGNALS CHECK - Early exit on predictive reversals ===
+  if (!shouldClose && currentSignal?.indicators?.sniperSignals) {
+    const sniper = currentSignal.indicators.sniperSignals;
+
+    // Divergence against position (early reversal warning)
+    if (sniper.divergence?.type === 'bearish' && positionSide === 'LONG' && sniper.divergence.strength > 50) {
+      shouldClose = true;
+      closeReason = `SNIPER EXIT: Bearish divergence detected (strength: ${sniper.divergence.strength.toFixed(0)})`;
+    } else if (sniper.divergence?.type === 'bullish' && positionSide === 'SHORT' && sniper.divergence.strength > 50) {
+      shouldClose = true;
+      closeReason = `SNIPER EXIT: Bullish divergence detected (strength: ${sniper.divergence.strength.toFixed(0)})`;
+    }
+
+    // Volume accumulation against position (smart money moving opposite)
+    if (!shouldClose && sniper.volumeAccumulation?.detected) {
+      const accumDir = sniper.volumeAccumulation.direction;
+      if (accumDir === 'bearish' && positionSide === 'LONG' && sniper.volumeAccumulation.strength > 60) {
+        shouldClose = true;
+        closeReason = `SNIPER EXIT: Bearish volume accumulation (strength: ${sniper.volumeAccumulation.strength.toFixed(0)})`;
+      } else if (accumDir === 'bullish' && positionSide === 'SHORT' && sniper.volumeAccumulation.strength > 60) {
+        shouldClose = true;
+        closeReason = `SNIPER EXIT: Bullish volume accumulation (strength: ${sniper.volumeAccumulation.strength.toFixed(0)})`;
+      }
+    }
+
+    // Early breakout against position (approaching key level)
+    if (!shouldClose && sniper.earlyBreakout) {
+      if (sniper.earlyBreakout.type === 'approaching_support' && positionSide === 'LONG' && sniper.earlyBreakout.strength > 70) {
+        shouldClose = true;
+        closeReason = `SNIPER EXIT: Price approaching breakdown (strength: ${sniper.earlyBreakout.strength.toFixed(0)})`;
+      } else if (sniper.earlyBreakout.type === 'approaching_resistance' && positionSide === 'SHORT' && sniper.earlyBreakout.strength > 70) {
+        shouldClose = true;
+        closeReason = `SNIPER EXIT: Price approaching breakout (strength: ${sniper.earlyBreakout.strength.toFixed(0)})`;
+      }
+    }
+
+    // Momentum building against position
+    if (!shouldClose && sniper.momentumBuilding?.detected) {
+      const momDir = sniper.momentumBuilding.direction;
+      if (momDir === 'bearish' && positionSide === 'LONG' && sniper.momentumBuilding.strength > 60) {
+        shouldClose = true;
+        closeReason = `SNIPER EXIT: Bearish momentum building (strength: ${sniper.momentumBuilding.strength.toFixed(0)})`;
+      } else if (momDir === 'bullish' && positionSide === 'SHORT' && sniper.momentumBuilding.strength > 60) {
+        shouldClose = true;
+        closeReason = `SNIPER EXIT: Bullish momentum building (strength: ${sniper.momentumBuilding.strength.toFixed(0)})`;
+      }
+    }
+
+    // Sniper score reversal - overall predictive signal against position
+    if (!shouldClose && sniper.score?.isSniper) {
+      if (sniper.score.direction === 'bearish' && positionSide === 'LONG' && sniper.score.score > 70) {
+        shouldClose = true;
+        closeReason = `SNIPER EXIT: Strong bearish sniper signal (score: ${sniper.score.score.toFixed(0)})`;
+      } else if (sniper.score.direction === 'bullish' && positionSide === 'SHORT' && sniper.score.score > 70) {
+        shouldClose = true;
+        closeReason = `SNIPER EXIT: Strong bullish sniper signal (score: ${sniper.score.score.toFixed(0)})`;
+      }
+    }
+  }
+
+  // === AI SNIPER ANALYSIS CHECK ===
+  if (!shouldClose && ai.sniperAnalysis?.isSniper) {
+    const sniperDir = ai.sniperAnalysis.direction;
+    if (sniperDir === 'bearish' && positionSide === 'LONG') {
+      shouldClose = true;
+      closeReason = `SNIPER EXIT: AI detected bearish sniper setup`;
+    } else if (sniperDir === 'bullish' && positionSide === 'SHORT') {
+      shouldClose = true;
+      closeReason = `SNIPER EXIT: AI detected bullish sniper setup`;
+    }
+  }
+
   // 4. Position age check - close stale trades after 4 hours with no significant movement
   const positionAge = Date.now() - position.openTime;
   const fourHours = 4 * 60 * 60 * 1000;
@@ -482,7 +602,8 @@ async function monitorPosition(symbol, currentSignal) {
 
   if (shouldClose) {
     console.log(`SMART EXIT: Closing ${symbol} - ${closeReason}`);
-    const result = await closePosition(symbol, closeReason);
+    const currentPrice = currentSignal?.indicators?.currentPrice;
+    const result = await closePosition(symbol, closeReason, currentPrice);
 
     // Update trade history
     const historyEntry = tradeHistory.find(t => t.symbol === symbol && t.status === 'OPENED');
