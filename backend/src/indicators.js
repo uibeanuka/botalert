@@ -513,10 +513,14 @@ function calculateTradeLevels({ currentPrice, atr, support, resistance, bollinge
     return null;
   }
 
-  const atrMultiplierSL = 1.5;  // Stop loss at 1.5x ATR
-  const atrMultiplierTP1 = 2;   // TP1 at 2x ATR (1:1.33 R:R)
-  const atrMultiplierTP2 = 3;   // TP2 at 3x ATR (1:2 R:R)
-  const atrMultiplierTP3 = 4.5; // TP3 at 4.5x ATR (1:3 R:R)
+  // Adjust multipliers based on volatility - tighter targets in low volatility
+  const atrPercent = (atr / currentPrice) * 100;
+  const isLowVolatility = atrPercent < 1.5; // Less than 1.5% ATR = low volatility
+
+  const atrMultiplierSL = isLowVolatility ? 1.2 : 1.5;  // Tighter SL in low vol
+  const atrMultiplierTP1 = isLowVolatility ? 1.5 : 2;   // TP1 closer in low vol
+  const atrMultiplierTP2 = isLowVolatility ? 2.5 : 3;   // TP2 adjusted for vol
+  const atrMultiplierTP3 = isLowVolatility ? 3.5 : 4.5; // TP3 adjusted for vol
 
   // Long trade levels
   const longEntry = currentPrice;

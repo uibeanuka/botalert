@@ -224,6 +224,22 @@ async function executeTrade(signal) {
     return { executed: false, reason: 'No valid trade setup' };
   }
 
+  // Check candle strength - avoid entering on weak/doji candles
+  const indicators = signal.indicators;
+  if (indicators?.atr && indicators?.currentPrice) {
+    const atrPercent = (indicators.atr / indicators.currentPrice) * 100;
+
+    // In very low volatility (< 0.8% ATR), skip trade - market is dead
+    if (atrPercent < 0.8) {
+      return { executed: false, reason: `Volatility too low (ATR ${atrPercent.toFixed(2)}%) - skipping` };
+    }
+
+    // Check if doji pattern detected (weak candle)
+    if (indicators.patterns?.includes('DOJI')) {
+      return { executed: false, reason: 'Doji candle detected - waiting for confirmation' };
+    }
+  }
+
   // Check daily trade limit
   const today = new Date().toDateString();
   if (dailyTrades.date !== today) {

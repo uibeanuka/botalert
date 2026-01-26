@@ -47,23 +47,34 @@ function predictNextMove(indicators, multiTimeframeData = null) {
   }
 
   // 2. RSI Analysis (weight: 20 points max)
+  // IMPORTANT: Reduce RSI signal strength when against the trend (avoid catching falling knives)
+  const trendDir = trend?.direction;
+  const inDowntrend = trendDir === 'DOWN' || trendDir === 'STRONG_DOWN';
+  const inUptrend = trendDir === 'UP' || trendDir === 'STRONG_UP';
+
   if (typeof rsi === 'number') {
     if (rsi < 25) {
-      bullScore += 20;
-      reasons.push(`RSI extremely oversold (${rsi.toFixed(1)})`);
+      // In downtrend, oversold RSI is less reliable (falling knife)
+      const rsiPoints = inDowntrend ? 8 : 20;
+      bullScore += rsiPoints;
+      reasons.push(`RSI extremely oversold (${rsi.toFixed(1)})${inDowntrend ? ' [trend caution]' : ''}`);
     } else if (rsi < 30) {
-      bullScore += 15;
-      reasons.push(`RSI oversold (${rsi.toFixed(1)})`);
+      const rsiPoints = inDowntrend ? 5 : 15;
+      bullScore += rsiPoints;
+      reasons.push(`RSI oversold (${rsi.toFixed(1)})${inDowntrend ? ' [trend caution]' : ''}`);
     } else if (rsi < 40) {
-      bullScore += 5;
+      bullScore += inDowntrend ? 2 : 5;
     } else if (rsi > 75) {
-      bearScore += 20;
-      reasons.push(`RSI extremely overbought (${rsi.toFixed(1)})`);
+      // In uptrend, overbought RSI is less reliable (momentum can continue)
+      const rsiPoints = inUptrend ? 8 : 20;
+      bearScore += rsiPoints;
+      reasons.push(`RSI extremely overbought (${rsi.toFixed(1)})${inUptrend ? ' [trend caution]' : ''}`);
     } else if (rsi > 70) {
-      bearScore += 15;
-      reasons.push(`RSI overbought (${rsi.toFixed(1)})`);
+      const rsiPoints = inUptrend ? 5 : 15;
+      bearScore += rsiPoints;
+      reasons.push(`RSI overbought (${rsi.toFixed(1)})${inUptrend ? ' [trend caution]' : ''}`);
     } else if (rsi > 60) {
-      bearScore += 5;
+      bearScore += inUptrend ? 2 : 5;
     }
   }
 
