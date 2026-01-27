@@ -14,6 +14,34 @@ const MAX_OPEN_POSITIONS = Number(process.env.MAX_OPEN_POSITIONS || 5);
 const MAX_DAILY_TRADES = Number(process.env.MAX_DAILY_TRADES || 20);
 const LEVERAGE = Number(process.env.LEVERAGE || 10);
 
+// Mutable runtime settings (can be changed via chat)
+const runtimeSettings = {
+  riskPerTrade: RISK_PER_TRADE,
+  minConfidence: MIN_CONFIDENCE,
+  maxOpenPositions: MAX_OPEN_POSITIONS,
+  maxDailyTrades: MAX_DAILY_TRADES,
+  leverage: LEVERAGE,
+};
+
+function updateSettings(updates) {
+  if (updates.riskPerTrade !== undefined) {
+    runtimeSettings.riskPerTrade = Math.max(0.01, Math.min(0.20, updates.riskPerTrade));
+  }
+  if (updates.minConfidence !== undefined) {
+    runtimeSettings.minConfidence = Math.max(0.50, Math.min(0.95, updates.minConfidence));
+  }
+  if (updates.maxOpenPositions !== undefined) {
+    runtimeSettings.maxOpenPositions = Math.max(1, Math.min(20, Math.floor(updates.maxOpenPositions)));
+  }
+  if (updates.maxDailyTrades !== undefined) {
+    runtimeSettings.maxDailyTrades = Math.max(1, Math.min(100, Math.floor(updates.maxDailyTrades)));
+  }
+  if (updates.leverage !== undefined) {
+    runtimeSettings.leverage = Math.max(1, Math.min(125, Math.floor(updates.leverage)));
+  }
+  return { ...runtimeSettings };
+}
+
 // State tracking
 const openPositions = new Map(); // symbol -> position info
 const dailyTrades = { count: 0, date: new Date().toDateString() };
@@ -212,10 +240,16 @@ async function executeTrade(signal) {
     return { executed: false, reason: 'No API keys configured' };
   }
 
-  // Check confidence threshold
+  // Check confidence threshold - sniper signals get a lower threshold (15% less)
   const confidence = signal.ai?.confidence || 0;
-  if (confidence < MIN_CONFIDENCE) {
-    return { executed: false, reason: `Confidence ${(confidence * 100).toFixed(0)}% below ${MIN_CONFIDENCE * 100}% threshold` };
+  const isSniper = signal.ai?.trade?.isSniper || signal.signal?.includes('SNIPER') || signal.ai?.sniperAnalysis?.isSniper;
+  const sniperDiscount = 0.15; // 15% lower confidence required for sniper entries
+  const effectiveThreshold = isSniper
+    ? Math.max(0.50, runtimeSettings.minConfidence - sniperDiscount)
+    : runtimeSettings.minConfidence;
+
+  if (confidence < effectiveThreshold) {
+    return { executed: false, reason: `Confidence ${(confidence * 100).toFixed(0)}% below ${(effectiveThreshold * 100).toFixed(0)}% threshold${isSniper ? ' (sniper)' : ''}` };
   }
 
   // Check if we have a valid trade setup
@@ -229,8 +263,9 @@ async function executeTrade(signal) {
   if (indicators?.atr && indicators?.currentPrice) {
     const atrPercent = (indicators.atr / indicators.currentPrice) * 100;
 
-    // In very low volatility (< 0.8% ATR), skip trade - market is dead
-    if (atrPercent < 0.8) {
+    // In very low volatility (< 0.15% ATR), skip trade - market is dead
+    // Note: 1m/5m/15m candles typically have 0.1-0.5% ATR; 0.8% was blocking most short-TF trades
+    if (atrPercent < 0.15) {
       return { executed: false, reason: `Volatility too low (ATR ${atrPercent.toFixed(2)}%) - skipping` };
     }
 
@@ -246,14 +281,14 @@ async function executeTrade(signal) {
     dailyTrades.date = today;
     dailyTrades.count = 0;
   }
-  if (dailyTrades.count >= MAX_DAILY_TRADES) {
-    return { executed: false, reason: `Daily trade limit (${MAX_DAILY_TRADES}) reached` };
+  if (dailyTrades.count >= runtimeSettings.maxDailyTrades) {
+    return { executed: false, reason: `Daily trade limit (${runtimeSettings.maxDailyTrades}) reached` };
   }
 
   // Check open positions limit
   const currentPositions = await getOpenPositions();
-  if (currentPositions.length >= MAX_OPEN_POSITIONS) {
-    return { executed: false, reason: `Max open positions (${MAX_OPEN_POSITIONS}) reached` };
+  if (currentPositions.length >= runtimeSettings.maxOpenPositions) {
+    return { executed: false, reason: `Max open positions (${runtimeSettings.maxOpenPositions}) reached` };
   }
 
   // Check if already in position for this symbol
@@ -277,12 +312,12 @@ async function executeTrade(signal) {
   }
 
   // Calculate position size based on risk
-  const riskAmount = balance * RISK_PER_TRADE;
+  const riskAmount = balance * runtimeSettings.riskPerTrade;
   const riskPerUnit = Math.abs(trade.entry - trade.stopLoss);
   let quantity = riskAmount / riskPerUnit;
 
   // Apply leverage
-  quantity = quantity / LEVERAGE;
+  quantity = quantity / runtimeSettings.leverage;
 
   // Round to step size
   quantity = roundToStep(quantity, symbolInfo.stepSize, symbolInfo.quantityPrecision);
@@ -299,7 +334,7 @@ async function executeTrade(signal) {
 
   try {
     // Set leverage first
-    await setLeverage(signal.symbol, LEVERAGE);
+    await setLeverage(signal.symbol, runtimeSettings.leverage);
 
     // Place market entry order
     const entryOrder = await placeMarketOrder(signal.symbol, side, quantity);
@@ -384,11 +419,12 @@ async function executeTrade(signal) {
       reasons: signal.ai.reasons,
       timestamp: Date.now(),
       status: 'OPENED',
+      isSniper,
       hasSL: !!slOrder,
       hasTP: !!tpOrder
     });
 
-    console.log(`TRADE EXECUTED: ${trade.type} ${signal.symbol} qty=${quantity} entry=${trade.entry} sl=${stopLoss} tp=${takeProfit} (SL: ${!!slOrder}, TP: ${!!tpOrder})`);
+    console.log(`${isSniper ? 'SNIPER ' : ''}TRADE EXECUTED: ${trade.type} ${signal.symbol} qty=${quantity} entry=${trade.entry} sl=${stopLoss} tp=${takeProfit} (SL: ${!!slOrder}, TP: ${!!tpOrder}, conf: ${(confidence * 100).toFixed(0)}%, threshold: ${(effectiveThreshold * 100).toFixed(0)}%)`);
 
     return {
       executed: true,
@@ -668,11 +704,11 @@ function getStatus() {
     enabled: TRADING_ENABLED,
     hasApiKeys: !!(API_KEY && API_SECRET),
     settings: {
-      riskPerTrade: RISK_PER_TRADE * 100,
-      minConfidence: MIN_CONFIDENCE * 100,
-      maxOpenPositions: MAX_OPEN_POSITIONS,
-      maxDailyTrades: MAX_DAILY_TRADES,
-      leverage: LEVERAGE
+      riskPerTrade: runtimeSettings.riskPerTrade * 100,
+      minConfidence: runtimeSettings.minConfidence * 100,
+      maxOpenPositions: runtimeSettings.maxOpenPositions,
+      maxDailyTrades: runtimeSettings.maxDailyTrades,
+      leverage: runtimeSettings.leverage
     },
     openPositions: Array.from(openPositions.values()),
     dailyTrades: dailyTrades.count,
@@ -690,6 +726,7 @@ module.exports = {
   getAccountBalance,
   getOpenPositions,
   getStatus,
+  updateSettings,
   TRADING_ENABLED,
   MIN_CONFIDENCE
 };

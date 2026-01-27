@@ -50,7 +50,7 @@ function savePatterns() {
 function extractPatternFingerprint(indicators) {
   if (!indicators) return null;
 
-  const { rsi, macd, bollinger, kdj, trend, sniperSignals, patterns } = indicators;
+  const { rsi, macd, bollinger, kdj, trend, sniperSignals, patterns, midweekReversal } = indicators;
 
   // Create a normalized fingerprint
   return {
@@ -80,7 +80,12 @@ function extractPatternFingerprint(indicators) {
     sniperScore: Math.round((sniperSignals?.score?.score || 0) / 10) * 10,
 
     // Candlestick patterns
-    candlePatterns: patterns || []
+    candlePatterns: patterns || [],
+
+    // Midweek reversal window (Lagos time)
+    midweekWindow: midweekReversal?.windowActive ? 'midweek' : 'normal',
+    midweekShape: midweekReversal?.shape || 'none',
+    midweekStrength: Math.round((midweekReversal?.strength || 0) / 20) * 20
   };
 }
 
@@ -95,7 +100,9 @@ function hashPattern(fingerprint) {
     fingerprint.trendDirection,
     fingerprint.hasDivergence || 'none',
     fingerprint.hasEarlyBreakout || 'none',
-    fingerprint.inSqueeze ? 'squeeze' : 'normal'
+    fingerprint.inSqueeze ? 'squeeze' : 'normal',
+    fingerprint.midweekWindow,
+    fingerprint.midweekShape
   ].join('-');
 
   return key;
@@ -192,18 +199,25 @@ function findSimilarPatterns(indicators) {
   }
 
   const wins = matches.filter(m => m.result === 'win').length;
-  const winRate = wins / matches.length;
+  const missedWins = matches.filter(m => m.result === 'missed_win').length;
+  const totalWins = wins + missedWins;
+  const winRate = totalWins / matches.length;
 
   // Check if this is a best pattern
   const isBestPattern = patternMemory.stats.bestPatterns.some(p => p.hash === hash);
 
+  // Extra boost when we've seen this pattern lead to big moves we missed
+  const missedBoost = missedWins > 0 ? Math.min(missedWins * 3, 10) : 0;
+
   return {
     found: true,
     matches: matches.length,
-    wins,
+    wins: totalWins,
+    missedWins,
     winRate: (winRate * 100).toFixed(1),
-    confidenceBoost: calculateConfidenceBoost(winRate, matches.length),
+    confidenceBoost: calculateConfidenceBoost(winRate, matches.length) + missedBoost,
     isBestPattern,
+    isMissedPattern: missedWins >= 2, // Seen this setup pump before
     historicalDirection: getHistoricalDirection(matches)
   };
 }
@@ -235,14 +249,68 @@ function getHistoricalDirection(matches) {
   return null;
 }
 
+// Record a missed opportunity — a symbol that pumped/dumped but the bot didn't trade
+// This teaches the AI what setups look like BEFORE big moves
+function recordMissedOpportunity(indicators, symbol, interval, priceChangePercent, direction) {
+  const fingerprint = extractPatternFingerprint(indicators);
+  if (!fingerprint) return;
+
+  const hash = hashPattern(fingerprint);
+  const isBigMove = Math.abs(priceChangePercent) >= 10;
+
+  const pattern = {
+    hash,
+    fingerprint,
+    symbol,
+    interval,
+    direction, // 'long' (pump) or 'short' (dump)
+    confidence: null, // bot didn't trade this
+    entryPrice: indicators.currentPrice,
+    result: 'missed_win', // it was a winning opportunity the bot missed
+    profit: isBigMove ? 2 : 1, // weight big moves higher
+    priceChangePercent,
+    source: 'missed_opportunity',
+    timestamp: Date.now()
+  };
+
+  patternMemory.patterns.push(pattern);
+  patternMemory.stats.totalPatterns++;
+  patternMemory.stats.successfulPatterns++; // count as successful since it would have been a win
+
+  patternMemory.stats.winRate =
+    patternMemory.stats.totalPatterns > 0
+      ? (patternMemory.stats.successfulPatterns / patternMemory.stats.totalPatterns * 100).toFixed(1)
+      : 0;
+
+  // Trim old patterns
+  if (patternMemory.patterns.length > MAX_PATTERNS) {
+    patternMemory.patterns = patternMemory.patterns.slice(-MAX_PATTERNS);
+  }
+
+  updateBestPatterns();
+
+  // Save every 5 missed opportunities
+  if (patternMemory.patterns.filter(p => p.source === 'missed_opportunity').length % 5 === 0) {
+    savePatterns();
+  }
+
+  console.log(`[LEARN] Missed ${direction.toUpperCase()} opportunity: ${symbol} moved ${priceChangePercent.toFixed(1)}% - pattern recorded (${hash})`);
+  return pattern;
+}
+
 // Get pattern memory stats
 function getStats() {
+  const missedCount = patternMemory.patterns.filter(p => p.source === 'missed_opportunity').length;
+  const tradedCount = patternMemory.patterns.filter(p => p.source !== 'missed_opportunity').length;
+
   return {
     totalPatterns: patternMemory.stats.totalPatterns,
     successfulPatterns: patternMemory.stats.successfulPatterns,
     winRate: patternMemory.stats.winRate,
     bestPatterns: patternMemory.stats.bestPatterns.slice(0, 5),
-    memorizedPatterns: patternMemory.patterns.length
+    memorizedPatterns: patternMemory.patterns.length,
+    missedOpportunities: missedCount,
+    tradedPatterns: tradedCount
   };
 }
 
@@ -253,6 +321,7 @@ module.exports = {
   extractPatternFingerprint,
   hashPattern,
   recordPattern,
+  recordMissedOpportunity,
   findSimilarPatterns,
   getStats,
   savePatterns,

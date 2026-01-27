@@ -22,3 +22,14 @@ export async function fetchMeta() {
 export async function subscribeToAlerts(subscription) {
   return axios.post(`${backendUrl}/api/subscribe`, subscription);
 }
+
+export async function fetchDcaPlan({ symbols, interval, budget }) {
+  const res = await axios.get(`${backendUrl}/api/dca-plan`, {
+    params: {
+      symbols: Array.isArray(symbols) ? symbols.join(',') : symbols,
+      interval,
+      budget
+    }
+  });
+  return res.data;
+}

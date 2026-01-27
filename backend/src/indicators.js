@@ -8,6 +8,14 @@ const {
   SMA
 } = require('technicalindicators');
 
+const LAGOS_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'Africa/Lagos',
+  weekday: 'short',
+  hour: '2-digit',
+  hour12: false
+});
+const MIDWEEK_WINDOW_HOURS = 12;
+
 function calculateIndicators(candles) {
   if (!candles || candles.length < 20) {
     return null;
@@ -105,6 +113,9 @@ function calculateIndicators(candles) {
   // 5. Squeeze Detection (low volatility before big move)
   const squeeze = detectSqueeze(bollinger, atr, closes);
 
+  // 6. Midweek reversal detection (Wed Lagos time, 12h V/U/W patterns)
+  const midweekReversal = detectMidweekReversal(candles, trend, atr, currentPrice);
+
   // Combine into sniper signals
   const sniperSignals = {
     divergence,
@@ -147,7 +158,8 @@ function calculateIndicators(candles) {
     momentumScore,
     tradeLevels,
     // New predictive features
-    sniperSignals
+    sniperSignals,
+    midweekReversal
   };
 }
 
@@ -402,6 +414,272 @@ function detectSqueeze(bollinger, atr, closes) {
   }
 
   return { inSqueeze, strength, bbWidth: round(bbWidth * 100, 2) };
+}
+
+function detectMidweekReversal(candles, trend, atr, currentPrice) {
+  if (!candles || candles.length < 6) {
+    return { windowActive: false, detected: false, shape: null, strength: 0, windowHours: MIDWEEK_WINDOW_HOURS };
+  }
+
+  const lastCandle = candles.at(-1);
+  const lastTime = lastCandle?.closeTime || lastCandle?.openTime;
+  if (!lastTime) {
+    return { windowActive: false, detected: false, shape: null, strength: 0, windowHours: MIDWEEK_WINDOW_HOURS };
+  }
+
+  const windowActive = isMidweekWindowLagos(lastTime);
+  if (!windowActive) {
+    return { windowActive: false, detected: false, shape: null, strength: 0, windowHours: MIDWEEK_WINDOW_HOURS };
+  }
+
+  const windowMs = MIDWEEK_WINDOW_HOURS * 60 * 60 * 1000;
+  const windowCandles = candles.filter((c) => {
+    const ts = c.closeTime || c.openTime || 0;
+    return ts >= lastTime - windowMs;
+  });
+
+  if (windowCandles.length < 6) {
+    return { windowActive, detected: false, shape: null, strength: 0, windowHours: MIDWEEK_WINDOW_HOURS };
+  }
+
+  const closes = windowCandles.map(c => c.close);
+  const trendDir = trend?.direction;
+  const inUptrend = trendDir === 'UP' || trendDir === 'STRONG_UP';
+  const inDowntrend = trendDir === 'DOWN' || trendDir === 'STRONG_DOWN';
+
+  if (!inUptrend && !inDowntrend) {
+    return { windowActive, detected: false, shape: null, strength: 0, windowHours: MIDWEEK_WINDOW_HOURS };
+  }
+
+  const atrPercent = atr && currentPrice ? (atr / currentPrice) : 0.005;
+  const drawThreshold = Math.max(atrPercent * 1.2, 0.006);
+  const recoveryTolerance = Math.max(atrPercent * 1.1, 0.004);
+
+  let detection = null;
+  if (inUptrend) {
+    detection = detectReversalUp(closes, drawThreshold, recoveryTolerance);
+  } else {
+    detection = detectReversalDown(closes, drawThreshold, recoveryTolerance);
+  }
+
+  if (!detection) {
+    return {
+      windowActive,
+      detected: false,
+      shape: null,
+      strength: 0,
+      direction: inUptrend ? 'up' : 'down',
+      windowHours: MIDWEEK_WINDOW_HOURS
+    };
+  }
+
+  return {
+    windowActive,
+    detected: true,
+    direction: inUptrend ? 'up' : 'down',
+    windowHours: MIDWEEK_WINDOW_HOURS,
+    ...detection
+  };
+}
+
+function detectReversalUp(closes, drawThreshold, recoveryTolerance) {
+  const doubleBottom = detectDoubleBottom(closes, drawThreshold, recoveryTolerance);
+  if (doubleBottom) return doubleBottom;
+  return detectSingleReversalUp(closes, drawThreshold, recoveryTolerance);
+}
+
+function detectReversalDown(closes, drawThreshold, recoveryTolerance) {
+  const doubleTop = detectDoubleTop(closes, drawThreshold, recoveryTolerance);
+  if (doubleTop) return doubleTop;
+  return detectSingleReversalDown(closes, drawThreshold, recoveryTolerance);
+}
+
+function detectSingleReversalUp(closes, drawThreshold, recoveryTolerance) {
+  const len = closes.length;
+  const firstEnd = Math.max(2, Math.floor(len / 3));
+  const peak = findMaxInRange(closes, 0, firstEnd);
+  if (peak.index < 0 || peak.index >= len - 2) return null;
+
+  const trough = findMinInRange(closes, peak.index + 1, len);
+  if (trough.index < 0) return null;
+
+  const drawdown = (peak.value - trough.value) / peak.value;
+  if (!isFinite(drawdown) || drawdown < drawThreshold) return null;
+
+  const recovery = findMaxInRange(closes, trough.index + 1, len);
+  if (recovery.index < 0 || recovery.value < peak.value * (1 - recoveryTolerance)) return null;
+
+  const bottomRange = (peak.value - trough.value) * 0.25;
+  const bottomCount = closes.filter(c => c <= trough.value + bottomRange).length;
+  const shape = bottomCount >= len * 0.3 ? 'U' : 'V';
+
+  return {
+    shape,
+    strength: Math.min(100, Math.round((drawdown / drawThreshold) * 50 + 30)),
+    drawdown: round(drawdown, 4)
+  };
+}
+
+function detectSingleReversalDown(closes, drawThreshold, recoveryTolerance) {
+  const len = closes.length;
+  const firstEnd = Math.max(2, Math.floor(len / 3));
+  const base = findMinInRange(closes, 0, firstEnd);
+  if (base.index < 0 || base.index >= len - 2) return null;
+
+  const pullback = findMaxInRange(closes, base.index + 1, len);
+  if (pullback.index < 0) return null;
+
+  const drawup = (pullback.value - base.value) / base.value;
+  if (!isFinite(drawup) || drawup < drawThreshold) return null;
+
+  const resume = findMinInRange(closes, pullback.index + 1, len);
+  if (resume.index < 0 || resume.value > base.value * (1 + recoveryTolerance)) return null;
+
+  const topRange = (pullback.value - base.value) * 0.25;
+  const topCount = closes.filter(c => c >= pullback.value - topRange).length;
+  const shape = topCount >= len * 0.3 ? 'U' : 'V';
+
+  return {
+    shape,
+    strength: Math.min(100, Math.round((drawup / drawThreshold) * 50 + 30)),
+    drawup: round(drawup, 4)
+  };
+}
+
+function detectDoubleBottom(closes, drawThreshold, recoveryTolerance) {
+  const len = closes.length;
+  const firstEnd = Math.max(2, Math.floor(len / 3));
+  const reference = Math.max(...closes.slice(0, firstEnd));
+  if (!isFinite(reference) || reference <= 0) return null;
+
+  const minima = findLocalMinima(closes);
+  if (minima.length < 2) return null;
+
+  for (let i = 0; i < minima.length - 1; i++) {
+    for (let j = i + 1; j < minima.length; j++) {
+      const m1 = minima[i];
+      const m2 = minima[j];
+      if (m2.index - m1.index < 2) continue;
+
+      const lowest = Math.min(m1.value, m2.value);
+      const drawdown = (reference - lowest) / reference;
+      if (!isFinite(drawdown) || drawdown < drawThreshold) continue;
+
+      const peakBetween = Math.max(...closes.slice(m1.index, m2.index + 1));
+      const bounce = (peakBetween - Math.max(m1.value, m2.value)) / reference;
+      if (!isFinite(bounce) || bounce < drawThreshold * 0.5) continue;
+
+      const recovery = Math.max(...closes.slice(m2.index));
+      if (recovery < reference * (1 - recoveryTolerance)) continue;
+
+      return {
+        shape: 'W',
+        strength: Math.min(100, Math.round((drawdown / drawThreshold) * 40 + (bounce / drawThreshold) * 20 + 20)),
+        drawdown: round(drawdown, 4)
+      };
+    }
+  }
+
+  return null;
+}
+
+function detectDoubleTop(closes, drawThreshold, recoveryTolerance) {
+  const len = closes.length;
+  const firstEnd = Math.max(2, Math.floor(len / 3));
+  const reference = Math.min(...closes.slice(0, firstEnd));
+  if (!isFinite(reference) || reference <= 0) return null;
+
+  const maxima = findLocalMaxima(closes);
+  if (maxima.length < 2) return null;
+
+  for (let i = 0; i < maxima.length - 1; i++) {
+    for (let j = i + 1; j < maxima.length; j++) {
+      const p1 = maxima[i];
+      const p2 = maxima[j];
+      if (p2.index - p1.index < 2) continue;
+
+      const highest = Math.max(p1.value, p2.value);
+      const drawup = (highest - reference) / reference;
+      if (!isFinite(drawup) || drawup < drawThreshold) continue;
+
+      const dipBetween = Math.min(...closes.slice(p1.index, p2.index + 1));
+      const pullback = (highest - dipBetween) / reference;
+      if (!isFinite(pullback) || pullback < drawThreshold * 0.5) continue;
+
+      const resume = Math.min(...closes.slice(p2.index));
+      if (resume > reference * (1 + recoveryTolerance)) continue;
+
+      return {
+        shape: 'W',
+        strength: Math.min(100, Math.round((drawup / drawThreshold) * 40 + (pullback / drawThreshold) * 20 + 20)),
+        drawup: round(drawup, 4)
+      };
+    }
+  }
+
+  return null;
+}
+
+function findLocalMinima(closes) {
+  const minima = [];
+  for (let i = 1; i < closes.length - 1; i++) {
+    if (closes[i] <= closes[i - 1] && closes[i] <= closes[i + 1]) {
+      minima.push({ index: i, value: closes[i] });
+    }
+  }
+  return minima;
+}
+
+function findLocalMaxima(closes) {
+  const maxima = [];
+  for (let i = 1; i < closes.length - 1; i++) {
+    if (closes[i] >= closes[i - 1] && closes[i] >= closes[i + 1]) {
+      maxima.push({ index: i, value: closes[i] });
+    }
+  }
+  return maxima;
+}
+
+function findMaxInRange(values, start, end) {
+  let max = -Infinity;
+  let idx = -1;
+  for (let i = start; i < end; i++) {
+    if (values[i] > max) {
+      max = values[i];
+      idx = i;
+    }
+  }
+  return { value: max, index: idx };
+}
+
+function findMinInRange(values, start, end) {
+  let min = Infinity;
+  let idx = -1;
+  for (let i = start; i < end; i++) {
+    if (values[i] < min) {
+      min = values[i];
+      idx = i;
+    }
+  }
+  return { value: min, index: idx };
+}
+
+function isMidweekWindowLagos(timestamp) {
+  const { weekdayIndex, hour } = getLagosWeekdayHour(timestamp);
+  if (weekdayIndex === 3) return true; // Wednesday only
+  return false;
+}
+
+function getLagosWeekdayHour(timestamp) {
+  const parts = LAGOS_FORMATTER.formatToParts(new Date(timestamp));
+  let weekday = null;
+  let hour = null;
+  for (const part of parts) {
+    if (part.type === 'weekday') weekday = part.value;
+    if (part.type === 'hour') hour = Number(part.value);
+  }
+  const map = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return { weekdayIndex: map[weekday] ?? -1, hour: Number.isFinite(hour) ? hour : 0 };
 }
 
 // Calculate overall sniper score

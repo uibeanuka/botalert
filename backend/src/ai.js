@@ -22,7 +22,8 @@ function predictNextMove(indicators, multiTimeframeData = null) {
     patterns,
     momentumScore,
     tradeLevels,
-    sniperSignals // NEW: Predictive signals
+    sniperSignals, // NEW: Predictive signals
+    midweekReversal // NEW: Midweek reversal caution
   } = indicators;
 
   let bullScore = 0;
@@ -180,6 +181,15 @@ function predictNextMove(indicators, multiTimeframeData = null) {
     }
   }
 
+  // 9b. Midweek reversal caution (Wednesday NY time, V/U/W patterns)
+  let midweekCaution = 0;
+  if (midweekReversal?.windowActive && midweekReversal?.detected) {
+    const shape = midweekReversal.shape || 'reversal';
+    const dir = midweekReversal.direction === 'down' ? 'downtrend' : 'uptrend';
+    reasons.push(`Caution: Midweek ${shape}-shape reversal (${dir})`);
+    midweekCaution = 0.03; // slight confidence trim, no direction change
+  }
+
   // === NEW: SNIPER/PREDICTIVE SIGNALS (weight: 30 points max) ===
   let sniperBonus = 0;
   if (sniperSignals) {
@@ -259,12 +269,17 @@ function predictNextMove(indicators, multiTimeframeData = null) {
       if (patternMatch.isBestPattern) {
         reasons.push(`LEARNED: High win-rate pattern (${patternMatch.winRate}%)`);
       }
+      // Extra flag when this pattern previously led to big moves the bot missed
+      if (patternMatch.isMissedPattern) {
+        reasons.push(`LEARNED: Pattern seen in ${patternMatch.missedWins} missed pumps`);
+        patternMemoryBoost += 5; // Extra urgency — don't miss it again
+      }
 
       // Adjust scores if historical direction is known
       if (patternMatch.historicalDirection === 'long') {
-        bullScore += 5;
+        bullScore += patternMatch.isMissedPattern ? 10 : 5;
       } else if (patternMatch.historicalDirection === 'short') {
-        bearScore += 5;
+        bearScore += patternMatch.isMissedPattern ? 10 : 5;
       }
     }
   } catch (e) {
@@ -322,6 +337,9 @@ function predictNextMove(indicators, multiTimeframeData = null) {
     // Multi-timeframe bonus
     confidence += mtfBonus / 100;
 
+    // Midweek reversal caution (small penalty)
+    confidence -= midweekCaution;
+
     // Determine direction and signal
     if (bullScore > bearScore) {
       direction = 'long';
@@ -332,9 +350,10 @@ function predictNextMove(indicators, multiTimeframeData = null) {
           confidence += 0.05;
         }
       }
-      // SNIPER signal upgrade
+      // SNIPER signal: upgrade any signal (HOLD/LONG/STRONG_LONG → SNIPER_LONG)
+      // Also allows sniper to generate entries when base scores are below threshold
       if (sniperSignals?.score?.isSniper && sniperSignals?.score?.direction === 'bullish') {
-        signal = signal === 'HOLD' ? 'SNIPER_LONG' : signal;
+        signal = 'SNIPER_LONG';
         confidence += 0.03;
       }
     } else if (bearScore > bullScore) {
@@ -346,10 +365,27 @@ function predictNextMove(indicators, multiTimeframeData = null) {
           confidence += 0.05;
         }
       }
-      // SNIPER signal upgrade
+      // SNIPER signal: upgrade any signal (HOLD/SHORT/STRONG_SHORT → SNIPER_SHORT)
       if (sniperSignals?.score?.isSniper && sniperSignals?.score?.direction === 'bearish') {
-        signal = signal === 'HOLD' ? 'SNIPER_SHORT' : signal;
+        signal = 'SNIPER_SHORT';
         confidence += 0.03;
+      }
+    }
+
+    // Sniper can also generate signals when scores are close but sniper conviction is high
+    // This handles the case where bullScore ~ bearScore (no clear winner) but sniper sees early setup
+    if (signal === 'HOLD' && sniperSignals?.score?.isSniper && sniperSignals?.score?.score >= 65) {
+      const sniperDir = sniperSignals.score.direction;
+      if (sniperDir === 'bullish') {
+        direction = 'long';
+        signal = 'SNIPER_LONG';
+        confidence += 0.05;
+        reasons.push('SNIPER: Early entry on strong predictive signal');
+      } else if (sniperDir === 'bearish') {
+        direction = 'short';
+        signal = 'SNIPER_SHORT';
+        confidence += 0.05;
+        reasons.push('SNIPER: Early entry on strong predictive signal');
       }
     }
   }

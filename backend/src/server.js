@@ -4,10 +4,14 @@ const http = require('http');
 const cors = require('cors');
 const { Server } = require('socket.io');
 const webpush = require('web-push');
-const { getCandles, getUsdtPerpetualMarkets } = require('./binance');
+const { getCandles, getUsdtPerpetualMarkets, getTopGainers } = require('./binance');
 const { calculateIndicators } = require('./indicators');
 const { predictNextMove } = require('./ai');
-const { executeTrade, closePosition, monitorAllPositions, getStatus: getTradingStatus, TRADING_ENABLED, MIN_CONFIDENCE } = require('./trading');
+const { buildDcaPlan, DEFAULT_DCA_SYMBOLS } = require('./dcaPlanner');
+const { executeTrade, closePosition, monitorAllPositions, getStatus: getTradingStatus, updateSettings, TRADING_ENABLED, MIN_CONFIDENCE } = require('./trading');
+const { handleChatMessage } = require('./chatHandler');
+const { getStats: getPatternStats, recordMissedOpportunity } = require('./patternMemory');
+const { startSpotDcaEngine } = require('./spotDcaEngine');
 
 const PORT = Number(process.env.PORT || 5000);
 const POLL_MS = Number(process.env.POLL_MS || 15_000);
@@ -61,12 +65,33 @@ let pollers = [];
 
 configureWebPush();
 bootstrapTracking();
+startSpotDcaEngine({ latestCandles });
 
 io.on('connection', (socket) => {
   socket.emit('bootstrap', {
     signals: Array.from(latestSignals.values()),
     symbols: trackedSymbols,
     intervals: trackedIntervals
+  });
+
+  // Chat handler
+  socket.on('chat:message', async (data) => {
+    const { message, id } = data || {};
+    const context = {
+      latestSignals,
+      latestCandles,
+      trackedSymbols,
+      trackedIntervals,
+      executeTrade,
+      closePosition,
+      getTradingStatus,
+      updateSettings,
+      getPatternStats,
+      getTopGainers,
+    };
+
+    const reply = await handleChatMessage(message || '', context);
+    socket.emit('chat:reply', { id, ...reply, timestamp: Date.now() });
   });
 });
 
@@ -118,8 +143,40 @@ app.post('/api/user-alerts', (req, res) => {
   res.status(201).json({ ok: true, note: 'Server stores subscriptions only in memory.' });
 });
 
+app.get('/api/top-movers', async (_req, res) => {
+  try {
+    const gainers = await getTopGainers(3, 20);
+    res.json({ movers: gainers });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch top movers', message: error.message });
+  }
+});
+
 app.get('/api/meta', (_req, res) => {
   res.json({ symbols: trackedSymbols, intervals: trackedIntervals });
+});
+
+app.get('/api/dca-plan', async (req, res) => {
+  const rawSymbols = (req.query.symbols || '').toString();
+  const symbols = rawSymbols
+    ? rawSymbols.split(',').map((s) => s.trim()).filter(Boolean)
+    : DEFAULT_DCA_SYMBOLS;
+  const intervalRaw = (req.query.interval || '1h').toString();
+  const interval = VALID_INTERVALS.has(intervalRaw) ? intervalRaw : '1h';
+  const budgetRaw = Number(req.query.budget || 100);
+  const budget = Number.isFinite(budgetRaw) && budgetRaw > 0 ? budgetRaw : 100;
+
+  try {
+    const plan = await buildDcaPlan({
+      symbols,
+      interval,
+      budget,
+      latestCandles
+    });
+    res.json(plan);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to build DCA plan', message: error.message });
+  }
 });
 
 app.get('/api/tracking', (_req, res) => {
@@ -168,7 +225,10 @@ async function pollSymbol(symbol, interval) {
       }
 
       // Auto-execute trade if enabled and meets criteria
-      if (TRADING_ENABLED && ai.confidence >= MIN_CONFIDENCE && ai.trade) {
+      // Sniper signals use a lower confidence gate (15% less) for early entry
+      const isSniper = ai.trade?.isSniper || signal.signal?.includes('SNIPER') || ai.sniperAnalysis?.isSniper;
+      const entryThreshold = isSniper ? Math.max(0.50, MIN_CONFIDENCE - 0.15) : MIN_CONFIDENCE;
+      if (TRADING_ENABLED && ai.confidence >= entryThreshold && ai.trade) {
         const tradeResult = await executeTrade(signal);
         if (tradeResult.executed) {
           io.emit('trade', { type: 'OPENED', ...tradeResult.order });
@@ -176,7 +236,11 @@ async function pollSymbol(symbol, interval) {
             `TRADE: ${signal.ai.trade.type} ${symbol}`,
             `Entry: ${signal.ai.trade.entry} | SL: ${tradeResult.order.stopLoss} | TP: ${tradeResult.order.takeProfit}`
           );
+        } else {
+          console.log(`[TRADE REJECTED] ${symbol} ${interval}: ${tradeResult.reason} (conf: ${(ai.confidence * 100).toFixed(0)}%, signal: ${signal.signal})`);
         }
+      } else if (TRADING_ENABLED && ai.trade && ai.confidence < entryThreshold) {
+        console.log(`[TRADE SKIPPED] ${symbol} ${interval}: confidence ${(ai.confidence * 100).toFixed(0)}% < threshold ${(entryThreshold * 100).toFixed(0)}% (signal: ${signal.signal}${isSniper ? ', sniper' : ''})`);
       }
     } else {
       latestSignals.set(key, {
@@ -197,15 +261,24 @@ function deriveSignal(symbol, interval, indicators, ai) {
   if (!indicators || !ai) return null;
   const timestamp = Date.now();
 
-  let signal = null;
-  const direction = ai.direction;
+  // Use AI's own signal type instead of re-deriving from direction
+  let signal = ai.signal;
 
-  if (direction === 'long' && ai.confidence >= 0.55) signal = 'LONG';
-  if (direction === 'short' && ai.confidence >= 0.55) signal = 'SHORT';
-  if (indicators.breakout?.direction === 'up') signal = 'BREAKOUT_UP';
-  if (indicators.breakout?.direction === 'down') signal = 'BREAKOUT_DOWN';
+  // If AI says HOLD, check for breakout-only entries
+  if (signal === 'HOLD' || !signal) {
+    if (indicators.breakout?.direction === 'up' && ai.confidence >= 0.55) signal = 'LONG';
+    else if (indicators.breakout?.direction === 'down' && ai.confidence >= 0.55) signal = 'SHORT';
+  }
 
-  if (!signal) return null;
+  // Breakout confluence: upgrade (never override) directional signals
+  if (indicators.breakout?.direction === 'up' && ['LONG', 'STRONG_LONG', 'SNIPER_LONG'].includes(signal)) {
+    signal = 'STRONG_LONG';
+  }
+  if (indicators.breakout?.direction === 'down' && ['SHORT', 'STRONG_SHORT', 'SNIPER_SHORT'].includes(signal)) {
+    signal = 'STRONG_SHORT';
+  }
+
+  if (!signal || signal === 'HOLD') return null;
 
   return {
     symbol,
@@ -274,6 +347,70 @@ function buildKey(symbol, interval) {
   return `${symbol}-${interval}`;
 }
 
+// Track which symbols we've already studied in recent scans (avoid duplicate learning)
+const studiedMovers = new Map(); // symbol -> last study timestamp
+
+// Scan top gainers/losers, study what their indicators looked like, and record patterns
+async function scanTopMovers() {
+  try {
+    const gainers = await getTopGainers(5, 20); // Symbols up 5%+ with >$1M volume
+    const now = Date.now();
+    const cooldown = 30 * 60 * 1000; // Don't re-study same symbol within 30 min
+
+    let studied = 0;
+    for (const mover of gainers) {
+      // Skip if recently studied
+      const lastStudied = studiedMovers.get(mover.symbol);
+      if (lastStudied && (now - lastStudied) < cooldown) continue;
+
+      // Skip if already tracked and has a signal (the normal pipeline handles it)
+      const existingSignal = latestSignals.get(buildKey(mover.symbol, '15m'));
+      if (existingSignal && existingSignal.signal !== 'NEUTRAL' && existingSignal.signal !== 'HOLD') continue;
+
+      try {
+        // Fetch candles for this mover on 15m and 1h to study the setup
+        const candles15m = await getCandles(mover.symbol, '15m', 100);
+        const indicators15m = calculateIndicators(candles15m);
+
+        if (indicators15m) {
+          const direction = mover.priceChangePercent > 0 ? 'long' : 'short';
+          recordMissedOpportunity(indicators15m, mover.symbol, '15m', mover.priceChangePercent, direction);
+          studied++;
+
+          // Also emit this as a learning event so the frontend knows
+          io.emit('learn', {
+            type: 'missed_opportunity',
+            symbol: mover.symbol,
+            change: mover.priceChangePercent,
+            direction,
+            timestamp: now
+          });
+        }
+
+        studiedMovers.set(mover.symbol, now);
+
+        // Don't overwhelm the API — study max 5 per scan
+        if (studied >= 5) break;
+      } catch (err) {
+        // Skip symbols that fail (might be delisted or API issue)
+        console.error(`[SCAN] Failed to study ${mover.symbol}:`, err.message);
+      }
+    }
+
+    if (studied > 0) {
+      console.log(`[SCANNER] Studied ${studied} top movers, learned from missed opportunities`);
+    }
+
+    // Clean up old entries from studiedMovers (older than 2 hours)
+    const twoHoursAgo = now - 2 * 60 * 60 * 1000;
+    for (const [symbol, ts] of studiedMovers) {
+      if (ts < twoHoursAgo) studiedMovers.delete(symbol);
+    }
+  } catch (err) {
+    console.error('[SCANNER] Top movers scan failed:', err.message);
+  }
+}
+
 function clearPollers() {
   pollers.forEach((id) => clearInterval(id));
   pollers = [];
@@ -288,6 +425,12 @@ function schedulePolling() {
       pollers.push(id);
     });
   });
+
+  // Scan top movers every 5 minutes to learn from missed opportunities
+  const scanId = setInterval(() => scanTopMovers(), 5 * 60 * 1000);
+  pollers.push(scanId);
+  // Run first scan after 60 seconds (let normal polling populate first)
+  setTimeout(() => scanTopMovers(), 60 * 1000);
 
   // Monitor open positions every 30 seconds for smart exits
   if (TRADING_ENABLED) {

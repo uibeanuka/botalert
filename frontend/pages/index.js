@@ -3,6 +3,8 @@ import Head from 'next/head';
 import dynamic from 'next/dynamic';
 import SignalTable from '../components/SignalTable';
 import AIAdvisor from '../components/AIAdvisor';
+import ChatWidget from '../components/ChatWidget';
+import BottomNav from '../components/BottomNav';
 import { fetchSignals, fetchCandles, fetchMeta } from '../lib/api';
 import { getSocket } from '../lib/socket';
 import { registerPush } from '../lib/pushClient';
@@ -103,7 +105,7 @@ export default function Home() {
   }
 
   return (
-    <>
+    <div className="page with-bottom-nav">
       <Head>
         <title>FuturesAI - Trading Signals</title>
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
@@ -348,7 +350,10 @@ export default function Home() {
           )}
         </div>
       </div>
-    </>
+
+      <ChatWidget />
+      <BottomNav />
+    </div>
   );
 }
 
