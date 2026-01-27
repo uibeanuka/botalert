@@ -18,7 +18,7 @@ const INTERVAL_OPTIONS = ['1h', '4h', '1d'];
 export default function DcaPage() {
   const [plan, setPlan] = useState(null);
   const [budget, setBudget] = useState(100);
-  const [interval, setInterval] = useState('1h');
+  const [interval, setDcaInterval] = useState('1h');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -84,7 +84,7 @@ export default function DcaPage() {
           <div className="header-right">
             <div className="select-group">
               <span className="select-label">TF</span>
-              <select className="select" value={interval} onChange={(e) => setInterval(e.target.value)}>
+              <select className="select" value={interval} onChange={(e) => setDcaInterval(e.target.value)}>
                 {INTERVAL_OPTIONS.map((tf) => (
                   <option key={tf} value={tf}>{tf.toUpperCase()}</option>
                 ))}
