@@ -27,7 +27,6 @@ export default function DcaPage() {
     setError('');
     try {
       const data = await fetchDcaPlan({
-        symbols: TARGET_SYMBOLS,
         interval,
         budget
       });
