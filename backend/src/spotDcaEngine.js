@@ -476,6 +476,19 @@ function startSpotDcaEngine({ latestCandles, latestSignals }) {
   return { dcaTimer, exitTimer };
 }
 
+function getSpotDcaStatus() {
+  return {
+    enabled: SPOT_DCA_ENABLED,
+    dryRun: SPOT_DCA_DRY_RUN,
+    sniperEnabled: SPOT_DCA_SNIPER_ENABLED,
+    smartExitEnabled: SPOT_DCA_SMART_EXIT_ENABLED,
+    budget: SPOT_DCA_BUDGET,
+    interval: SPOT_DCA_INTERVAL,
+    minTrade: SPOT_DCA_MIN_TRADE
+  };
+}
+
 module.exports = {
-  startSpotDcaEngine
+  startSpotDcaEngine,
+  getSpotDcaStatus
 };

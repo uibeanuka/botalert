@@ -116,6 +116,9 @@ function calculateIndicators(candles) {
   // 6. Midweek reversal detection (Wed Lagos time, 12h V/U/W patterns)
   const midweekReversal = detectMidweekReversal(candles, trend, atr, currentPrice);
 
+  // 7. Volume Surge Detection (rapid volume acceleration — meme coin pump detector)
+  const volumeSurge = detectVolumeSurge(candles, volumes, avgVolume);
+
   // Combine into sniper signals
   const sniperSignals = {
     divergence,
@@ -123,8 +126,9 @@ function calculateIndicators(candles) {
     earlyBreakout,
     momentumBuilding,
     squeeze,
+    volumeSurge,
     // Overall sniper score (0-100)
-    score: calculateSniperScore(divergence, volumeAccumulation, earlyBreakout, momentumBuilding, squeeze)
+    score: calculateSniperScore(divergence, volumeAccumulation, earlyBreakout, momentumBuilding, squeeze, volumeSurge)
   };
 
   // Momentum score
@@ -159,7 +163,9 @@ function calculateIndicators(candles) {
     tradeLevels,
     // New predictive features
     sniperSignals,
-    midweekReversal
+    midweekReversal,
+    // Volume surge data for meme coin detection
+    volumeSurge: volumeSurge
   };
 }
 
@@ -682,8 +688,80 @@ function getLagosWeekdayHour(timestamp) {
   return { weekdayIndex: map[weekday] ?? -1, hour: Number.isFinite(hour) ? hour : 0 };
 }
 
+// Detect rapid volume surge (volume accelerating across candles — meme/alpha pump detector)
+// Unlike volumeSpike (single candle 2x avg), this detects ACCELERATION: each candle's volume growing
+function detectVolumeSurge(candles, volumes, avgVolume) {
+  if (!candles || candles.length < 6) {
+    return { detected: false, intensity: 0, acceleration: 0, direction: null, consecutiveGreen: 0 };
+  }
+
+  const recent = candles.slice(-6);
+  const recentVols = volumes.slice(-6);
+
+  // 1. Check volume acceleration: are last 3 candles each bigger than the previous?
+  let accelerating = 0;
+  for (let i = recentVols.length - 3; i < recentVols.length; i++) {
+    if (recentVols[i] > recentVols[i - 1] * 1.2) accelerating++;
+  }
+
+  // 2. Current volume vs average (intensity)
+  const lastThreeAvg = (recentVols.at(-1) + recentVols.at(-2) + recentVols.at(-3)) / 3;
+  const intensity = avgVolume > 0 ? lastThreeAvg / avgVolume : 0;
+
+  // 3. Price direction during surge
+  let consecutiveGreen = 0;
+  for (let i = recent.length - 1; i >= 0; i--) {
+    if (recent[i].close > recent[i].open) consecutiveGreen++;
+    else break;
+  }
+
+  let consecutiveRed = 0;
+  for (let i = recent.length - 1; i >= 0; i--) {
+    if (recent[i].close < recent[i].open) consecutiveRed++;
+    else break;
+  }
+
+  // 4. Price change during the surge window
+  const surgeStart = recent[0].open;
+  const surgeEnd = recent.at(-1).close;
+  const surgePct = surgeStart > 0 ? ((surgeEnd - surgeStart) / surgeStart) * 100 : 0;
+
+  // Detect surge: volume 3x+ avg AND accelerating AND directional
+  const isVolumeSurge = intensity >= 3 && accelerating >= 2;
+  // Also detect emerging surge: volume 2x+ AND some acceleration
+  const isEmergingSurge = intensity >= 2 && accelerating >= 1 && (consecutiveGreen >= 3 || consecutiveRed >= 3);
+
+  const detected = isVolumeSurge || isEmergingSurge;
+
+  let direction = null;
+  if (detected) {
+    if (consecutiveGreen >= 2 && surgePct > 0) direction = 'bullish';
+    else if (consecutiveRed >= 2 && surgePct < 0) direction = 'bearish';
+  }
+
+  // Strength score (0-100)
+  let strength = 0;
+  if (detected) {
+    strength += Math.min(intensity * 10, 40);           // Volume intensity (max 40)
+    strength += accelerating * 15;                       // Acceleration (max 45)
+    strength += Math.min(Math.abs(surgePct) * 2, 15);   // Price move size (max 15)
+  }
+
+  return {
+    detected,
+    intensity: round(intensity, 2),
+    acceleration: accelerating,
+    direction,
+    consecutiveGreen,
+    consecutiveRed,
+    surgePct: round(surgePct, 2),
+    strength: Math.min(Math.round(strength), 100),
+    isExplosive: isVolumeSurge && Math.abs(surgePct) > 3 // 3%+ move with 3x volume = explosive
+  };
+}
+
 // Calculate overall sniper score
-function calculateSniperScore(divergence, volumeAccumulation, earlyBreakout, momentumBuilding, squeeze) {
+function calculateSniperScore(divergence, volumeAccumulation, earlyBreakout, momentumBuilding, squeeze, volumeSurge) {
   let score = 0;
   let direction = null;
   const signals = [];
@@ -718,11 +796,19 @@ function calculateSniperScore(divergence, volumeAccumulation, earlyBreakout, mom
     signals.push('Squeeze detected');
   }
 
+  // Volume surge (meme/alpha detection) — high weight, this is the primary meme signal
+  if (volumeSurge && volumeSurge.detected) {
+    score += volumeSurge.strength * 0.3;
+    if (!direction) direction = volumeSurge.direction;
+    signals.push(`Volume surge: ${volumeSurge.intensity.toFixed(1)}x avg${volumeSurge.isExplosive ? ' (EXPLOSIVE)' : ''}`);
+  }
+
   return {
     score: Math.min(Math.round(score), 100),
     direction,
     signals,
-    isSniper: score >= 50 // Strong predictive signal
+    isSniper: score >= 50, // Strong predictive signal
+    isVolumeSurge: !!(volumeSurge && volumeSurge.detected)
   };
 }
 
@@ -975,5 +1061,6 @@ module.exports = {
   detectEarlyBreakout,
   detectMomentumBuilding,
   detectSqueeze,
+  detectVolumeSurge,
   calculateSniperScore
 };

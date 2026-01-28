@@ -82,6 +82,14 @@ function extractPatternFingerprint(indicators) {
     // Candlestick patterns
     candlePatterns: patterns || [],
 
+    // Volume surge (meme/alpha pump detection)
+    hasVolumeSurge: indicators.volumeSurge?.detected || indicators.sniperSignals?.volumeSurge?.detected || false,
+    volumeSurgeIntensity: Math.round((indicators.volumeSurge?.intensity || indicators.sniperSignals?.volumeSurge?.intensity || 0) * 10) / 10,
+    volumeSurgeExplosive: indicators.volumeSurge?.isExplosive || indicators.sniperSignals?.volumeSurge?.isExplosive || false,
+
+    // Volume ratio zone for general volume context
+    volumeZone: (indicators.volumeRatio || 0) < 1 ? 'low' : (indicators.volumeRatio || 0) < 2 ? 'normal' : (indicators.volumeRatio || 0) < 4 ? 'high' : 'extreme',
+
     // Midweek reversal window (Lagos time)
     midweekWindow: midweekReversal?.windowActive ? 'midweek' : 'normal',
     midweekShape: midweekReversal?.shape || 'none',
@@ -101,6 +109,8 @@ function hashPattern(fingerprint) {
     fingerprint.hasDivergence || 'none',
     fingerprint.hasEarlyBreakout || 'none',
     fingerprint.inSqueeze ? 'squeeze' : 'normal',
+    fingerprint.hasVolumeSurge ? (fingerprint.volumeSurgeExplosive ? 'explosive' : 'surge') : 'noSurge',
+    fingerprint.volumeZone || 'normal',
     fingerprint.midweekWindow,
     fingerprint.midweekShape
   ].join('-');

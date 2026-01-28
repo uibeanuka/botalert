@@ -240,16 +240,31 @@ async function executeTrade(signal) {
     return { executed: false, reason: 'No API keys configured' };
   }
 
-  // Check confidence threshold - sniper signals get a lower threshold (15% less)
+  // Check confidence threshold - sniper/surge signals get lower thresholds
   const confidence = signal.ai?.confidence || 0;
   const isSniper = signal.ai?.trade?.isSniper || signal.signal?.includes('SNIPER') || signal.ai?.sniperAnalysis?.isSniper;
-  const sniperDiscount = 0.15; // 15% lower confidence required for sniper entries
-  const effectiveThreshold = isSniper
-    ? Math.max(0.50, runtimeSettings.minConfidence - sniperDiscount)
-    : runtimeSettings.minConfidence;
+  const isVolumeSurge = signal.ai?.sniperAnalysis?.isVolumeSurge || signal.ai?.sniperAnalysis?.volumeSurge?.detected || signal.indicators?.volumeSurge?.detected;
+  const isExplosiveSurge = signal.ai?.sniperAnalysis?.volumeSurge?.isExplosive || signal.indicators?.volumeSurge?.isExplosive;
+
+  let effectiveThreshold = runtimeSettings.minConfidence;
+  let thresholdLabel = '';
+
+  if (isExplosiveSurge) {
+    // Explosive volume surge = meme/alpha pump, lowest threshold (45%)
+    effectiveThreshold = Math.max(0.45, runtimeSettings.minConfidence - 0.20);
+    thresholdLabel = ' (explosive surge)';
+  } else if (isVolumeSurge) {
+    // Volume surge = emerging move, lower threshold (50%)
+    effectiveThreshold = Math.max(0.50, runtimeSettings.minConfidence - 0.15);
+    thresholdLabel = ' (volume surge)';
+  } else if (isSniper) {
+    // Sniper signal = predictive entry (50%)
+    effectiveThreshold = Math.max(0.50, runtimeSettings.minConfidence - 0.15);
+    thresholdLabel = ' (sniper)';
+  }
 
   if (confidence < effectiveThreshold) {
-    return { executed: false, reason: `Confidence ${(confidence * 100).toFixed(0)}% below ${(effectiveThreshold * 100).toFixed(0)}% threshold${isSniper ? ' (sniper)' : ''}` };
+    return { executed: false, reason: `Confidence ${(confidence * 100).toFixed(0)}% below ${(effectiveThreshold * 100).toFixed(0)}% threshold${thresholdLabel}` };
   }
 
   // Check if we have a valid trade setup
@@ -420,11 +435,14 @@ async function executeTrade(signal) {
       timestamp: Date.now(),
       status: 'OPENED',
       isSniper,
+      isVolumeSurge: !!isVolumeSurge,
+      isExplosiveSurge: !!isExplosiveSurge,
       hasSL: !!slOrder,
       hasTP: !!tpOrder
     });
 
-    console.log(`${isSniper ? 'SNIPER ' : ''}TRADE EXECUTED: ${trade.type} ${signal.symbol} qty=${quantity} entry=${trade.entry} sl=${stopLoss} tp=${takeProfit} (SL: ${!!slOrder}, TP: ${!!tpOrder}, conf: ${(confidence * 100).toFixed(0)}%, threshold: ${(effectiveThreshold * 100).toFixed(0)}%)`);
+    const tradeTag = isExplosiveSurge ? 'SURGE EXPLOSIVE ' : isVolumeSurge ? 'SURGE ' : isSniper ? 'SNIPER ' : '';
+    console.log(`${tradeTag}TRADE EXECUTED: ${trade.type} ${signal.symbol} qty=${quantity} entry=${trade.entry} sl=${stopLoss} tp=${takeProfit} (SL: ${!!slOrder}, TP: ${!!tpOrder}, conf: ${(confidence * 100).toFixed(0)}%, threshold: ${(effectiveThreshold * 100).toFixed(0)}%)`);
 
     return {
       executed: true,
@@ -436,7 +454,9 @@ async function executeTrade(signal) {
         stopLoss,
         takeProfit,
         hasSL: !!slOrder,
-        hasTP: !!tpOrder
+        hasTP: !!tpOrder,
+        isVolumeSurge,
+        isExplosiveSurge
       }
     };
   } catch (err) {

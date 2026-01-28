@@ -4,14 +4,14 @@ const http = require('http');
 const cors = require('cors');
 const { Server } = require('socket.io');
 const webpush = require('web-push');
-const { getCandles, getUsdtPerpetualMarkets, getTopGainers } = require('./binance');
+const { getCandles, getUsdtPerpetualMarkets, getTopGainers, getVolumeSurgers } = require('./binance');
 const { calculateIndicators } = require('./indicators');
 const { predictNextMove } = require('./ai');
 const { buildDcaPlan, DEFAULT_DCA_SYMBOLS } = require('./dcaPlanner');
 const { executeTrade, closePosition, monitorAllPositions, getStatus: getTradingStatus, updateSettings, TRADING_ENABLED, MIN_CONFIDENCE } = require('./trading');
 const { handleChatMessage } = require('./chatHandler');
 const { getStats: getPatternStats, recordMissedOpportunity } = require('./patternMemory');
-const { startSpotDcaEngine } = require('./spotDcaEngine');
+const { startSpotDcaEngine, getSpotDcaStatus } = require('./spotDcaEngine');
 
 const PORT = Number(process.env.PORT || 5000);
 const POLL_MS = Number(process.env.POLL_MS || 15_000);
@@ -173,7 +173,8 @@ app.get('/api/dca-plan', async (req, res) => {
       budget,
       latestCandles
     });
-    res.json(plan);
+    const spotStatus = getSpotDcaStatus();
+    res.json({ ...plan, spotDca: spotStatus });
   } catch (error) {
     res.status(500).json({ error: 'Failed to build DCA plan', message: error.message });
   }
@@ -226,8 +227,18 @@ async function pollSymbol(symbol, interval) {
 
       // Auto-execute trade if enabled and meets criteria
       // Sniper signals use a lower confidence gate (15% less) for early entry
+      // Volume surge signals use even lower gates (20% less for explosive)
       const isSniper = ai.trade?.isSniper || signal.signal?.includes('SNIPER') || ai.sniperAnalysis?.isSniper;
-      const entryThreshold = isSniper ? Math.max(0.50, MIN_CONFIDENCE - 0.15) : MIN_CONFIDENCE;
+      const isVolumeSurge = ai.sniperAnalysis?.isVolumeSurge || indicators?.volumeSurge?.detected;
+      const isExplosiveSurge = ai.sniperAnalysis?.volumeSurge?.isExplosive || indicators?.volumeSurge?.isExplosive;
+      let entryThreshold = MIN_CONFIDENCE;
+      if (isExplosiveSurge) {
+        entryThreshold = Math.max(0.45, MIN_CONFIDENCE - 0.20);
+      } else if (isVolumeSurge) {
+        entryThreshold = Math.max(0.50, MIN_CONFIDENCE - 0.15);
+      } else if (isSniper) {
+        entryThreshold = Math.max(0.50, MIN_CONFIDENCE - 0.15);
+      }
       if (TRADING_ENABLED && ai.confidence >= entryThreshold && ai.trade) {
         const tradeResult = await executeTrade(signal);
         if (tradeResult.executed) {
@@ -240,7 +251,8 @@ async function pollSymbol(symbol, interval) {
           console.log(`[TRADE REJECTED] ${symbol} ${interval}: ${tradeResult.reason} (conf: ${(ai.confidence * 100).toFixed(0)}%, signal: ${signal.signal})`);
         }
       } else if (TRADING_ENABLED && ai.trade && ai.confidence < entryThreshold) {
-        console.log(`[TRADE SKIPPED] ${symbol} ${interval}: confidence ${(ai.confidence * 100).toFixed(0)}% < threshold ${(entryThreshold * 100).toFixed(0)}% (signal: ${signal.signal}${isSniper ? ', sniper' : ''})`);
+        const tag = isExplosiveSurge ? ', explosive surge' : isVolumeSurge ? ', surge' : isSniper ? ', sniper' : '';
+        console.log(`[TRADE SKIPPED] ${symbol} ${interval}: confidence ${(ai.confidence * 100).toFixed(0)}% < threshold ${(entryThreshold * 100).toFixed(0)}% (signal: ${signal.signal}${tag})`);
       }
     } else {
       latestSignals.set(key, {
@@ -411,6 +423,137 @@ async function scanTopMovers() {
   }
 }
 
+// Proactive volume surge scanner — finds coins with emerging volume surges BEFORE the pump
+// This is the key to catching meme/alpha like PIPPIN, BTR, PTB, HYPE, 1000RATS early
+const surgeCooldown = new Map(); // symbol -> last surge scan timestamp
+
+async function scanVolumeSurges() {
+  try {
+    const surgers = await getVolumeSurgers(20);
+    const now = Date.now();
+    const cooldownMs = 15 * 60 * 1000; // 15 min cooldown per symbol
+    let scanned = 0;
+    let alerted = 0;
+
+    for (const surger of surgers) {
+      // Skip recently scanned
+      const lastScan = surgeCooldown.get(surger.symbol);
+      if (lastScan && (now - lastScan) < cooldownMs) continue;
+
+      // Skip if already tracked with a recent signal
+      const existing5m = latestSignals.get(buildKey(surger.symbol, '5m'));
+      const existing15m = latestSignals.get(buildKey(surger.symbol, '15m'));
+      const hasActiveSignal = (existing5m && existing5m.signal !== 'NEUTRAL' && existing5m.signal !== 'HOLD') ||
+                              (existing15m && existing15m.signal !== 'NEUTRAL' && existing15m.signal !== 'HOLD');
+
+      try {
+        // Fetch short-term candles to analyze the surge
+        const candles5m = await getCandles(surger.symbol, '5m', 50);
+        const indicators5m = calculateIndicators(candles5m);
+
+        if (!indicators5m) {
+          surgeCooldown.set(surger.symbol, now);
+          continue;
+        }
+
+        // Check if this coin actually has a volume surge in its candle data
+        const volumeSurge = indicators5m.sniperSignals?.volumeSurge || indicators5m.volumeSurge;
+        if (!volumeSurge?.detected) {
+          surgeCooldown.set(surger.symbol, now);
+          continue;
+        }
+
+        // Run AI prediction to understand WHY it's moving
+        const ai = predictNextMove(indicators5m);
+        scanned++;
+
+        // Record the surge pattern for learning
+        if (volumeSurge.detected) {
+          const direction = surger.priceChangePercent > 0 ? 'long' : 'short';
+          recordMissedOpportunity(indicators5m, surger.symbol, '5m', surger.priceChangePercent, direction);
+        }
+
+        // If AI finds a signal AND there's a volume surge, dynamically add to tracking
+        const isActionable = ai.confidence >= 0.45 && ai.signal !== 'HOLD' && volumeSurge.strength >= 40;
+
+        if (isActionable) {
+          // Add to tracked symbols if not already tracked
+          if (!trackedSymbols.includes(surger.symbol)) {
+            // Add it (temporarily displacing the last non-priority symbol)
+            trackedSymbols.push(surger.symbol);
+            // Start polling this symbol immediately
+            trackedIntervals.forEach((interval) => {
+              pollSymbol(surger.symbol, interval);
+              const id = setInterval(() => pollSymbol(surger.symbol, interval), POLL_MS);
+              pollers.push(id);
+            });
+            console.log(`[SURGE SCANNER] Dynamically added ${surger.symbol} to tracking (surge: ${volumeSurge.intensity.toFixed(1)}x, AI: ${ai.signal} ${(ai.confidence * 100).toFixed(0)}%)`);
+          }
+
+          // Emit surge alert
+          const signal = deriveSignal(surger.symbol, '5m', indicators5m, ai);
+          if (signal) {
+            latestSignals.set(buildKey(surger.symbol, '5m'), signal);
+            io.emit('signal', signal);
+            io.emit('surge', {
+              type: 'volume_surge',
+              symbol: surger.symbol,
+              price: surger.lastPrice,
+              change: surger.priceChangePercent,
+              volumeIntensity: volumeSurge.intensity,
+              surgeStrength: volumeSurge.strength,
+              isExplosive: volumeSurge.isExplosive,
+              aiSignal: ai.signal,
+              aiConfidence: ai.confidence,
+              reasons: ai.reasons?.slice(0, 4) || [],
+              timestamp: now
+            });
+            alerted++;
+
+            // Auto-execute if trading is enabled and meets threshold
+            const isSniper = ai.trade?.isSniper || signal.signal?.includes('SNIPER') || ai.sniperAnalysis?.isSniper;
+            const isSurge = volumeSurge.isExplosive;
+            // Volume surge trades get aggressive threshold: 45% for explosive, 50% for regular surge
+            const surgeThreshold = isSurge ? 0.45 : (isSniper ? Math.max(0.50, MIN_CONFIDENCE - 0.15) : MIN_CONFIDENCE);
+
+            if (TRADING_ENABLED && ai.confidence >= surgeThreshold && ai.trade) {
+              const tradeResult = await executeTrade(signal);
+              if (tradeResult.executed) {
+                io.emit('trade', { type: 'SURGE_ENTRY', ...tradeResult.order });
+                sendPushNotification(
+                  `SURGE TRADE: ${ai.trade.type} ${surger.symbol}`,
+                  `Vol ${volumeSurge.intensity.toFixed(1)}x | ${surger.priceChangePercent.toFixed(1)}% | ${ai.reasons?.[0] || ''}`
+                );
+                console.log(`[SURGE TRADE] ${ai.trade.type} ${surger.symbol} - vol ${volumeSurge.intensity.toFixed(1)}x, conf ${(ai.confidence * 100).toFixed(0)}%`);
+              }
+            }
+          }
+        }
+
+        surgeCooldown.set(surger.symbol, now);
+
+        // Max 8 symbols per scan to avoid API rate limits
+        if (scanned >= 8) break;
+      } catch (err) {
+        console.error(`[SURGE] Failed to analyze ${surger.symbol}:`, err.message);
+        surgeCooldown.set(surger.symbol, now);
+      }
+    }
+
+    if (scanned > 0) {
+      console.log(`[SURGE SCANNER] Scanned ${scanned} volume surgers, ${alerted} alerts generated`);
+    }
+
+    // Clean old cooldown entries
+    const twoHoursAgo = now - 2 * 60 * 60 * 1000;
+    for (const [symbol, ts] of surgeCooldown) {
+      if (ts < twoHoursAgo) surgeCooldown.delete(symbol);
+    }
+  } catch (err) {
+    console.error('[SURGE SCANNER] Failed:', err.message);
+  }
+}
+
 function clearPollers() {
   pollers.forEach((id) => clearInterval(id));
   pollers = [];
@@ -431,6 +574,12 @@ function schedulePolling() {
   pollers.push(scanId);
   // Run first scan after 60 seconds (let normal polling populate first)
   setTimeout(() => scanTopMovers(), 60 * 1000);
+
+  // Proactive volume surge scanner — runs every 2 minutes to catch meme/alpha early
+  const surgeId = setInterval(() => scanVolumeSurges(), 2 * 60 * 1000);
+  pollers.push(surgeId);
+  // First surge scan after 30 seconds
+  setTimeout(() => scanVolumeSurges(), 30 * 1000);
 
   // Monitor open positions every 30 seconds for smart exits
   if (TRADING_ENABLED) {

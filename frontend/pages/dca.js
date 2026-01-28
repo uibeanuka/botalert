@@ -167,10 +167,39 @@ export default function DcaPage() {
           <div className="card">
             <div className="card-header">
               <span className="card-title">Automation</span>
+              {plan?.spotDca?.enabled && (
+                <span className={`tag ${plan.spotDca.dryRun ? 'tag-neutral' : 'tag-long'}`}>
+                  {plan.spotDca.dryRun ? 'Dry Run' : 'Live'}
+                </span>
+              )}
             </div>
             <div className="dca-note">
-              Recommendations only. Auto-swaps and spot executions are disabled in this view.
+              {plan?.spotDca?.enabled ? (
+                plan.spotDca.dryRun ? (
+                  <>Spot DCA engine active (dry-run mode). Orders are logged but not executed.</>
+                ) : (
+                  <>Spot DCA engine active. Auto-buys on ACCUMULATE, auto-sells on SWAP_TO_USDC.</>
+                )
+              ) : (
+                <>Spot DCA engine disabled. Set SPOT_DCA_ENABLED=true to activate auto-execution.</>
+              )}
             </div>
+            {plan?.spotDca?.enabled && (
+              <div className="dca-reserve">
+                <div className="dca-reserve-item">
+                  <span>Sniper Entry</span>
+                  <span>{plan.spotDca.sniperEnabled ? 'ON' : 'OFF'}</span>
+                </div>
+                <div className="dca-reserve-item">
+                  <span>Smart Exit</span>
+                  <span>{plan.spotDca.smartExitEnabled ? 'ON' : 'OFF'}</span>
+                </div>
+                <div className="dca-reserve-item">
+                  <span>Min Trade</span>
+                  <span>${plan.spotDca.minTrade} USDC</span>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

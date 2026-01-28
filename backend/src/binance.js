@@ -48,7 +48,8 @@ const PRIORITY_SYMBOLS = [
   'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT',
   'FARTCOINUSDT', 'PENGUUSDT', 'PIPPINUSDT', 'ASTERUSDT', 'GIGGLEUSDT', 'TRADOORUSDT',
   'WIFUSDT', 'ORDIUSDT', '1000BONKUSDT', '1000PEPEUSDT', '1000SHIBUSDT', '1000FLOKIUSDT',
-  'TURTLEUSDT', 'PUMPUSDT', 'CITYUSDT', 'AXLUSDT'
+  'TURTLEUSDT', 'PUMPUSDT', 'CITYUSDT', 'AXLUSDT',
+  'BTRUSDT', 'PTBUSDT', 'HYPEUSDT', '1000RATSUSDT'
 ];
 
 async function getFuturesSymbols() {
@@ -156,6 +157,43 @@ async function getTopGainers(minChange = 5, limit = 20) {
     .slice(0, limit);
 }
 
+// Get coins with emerging volume surges (high volume increase but price hasn't fully pumped yet)
+// This catches meme/alpha coins BEFORE the big move completes
+async function getVolumeSurgers(limit = 30) {
+  const res = await withFallback((client) => client.get('/fapi/v1/ticker/24hr'));
+  const tickers = res.data
+    .filter((t) => t.symbol.endsWith('USDT'))
+    .map((t) => ({
+      symbol: t.symbol,
+      priceChangePercent: Number(t.priceChangePercent),
+      lastPrice: Number(t.lastPrice),
+      volume: Number(t.quoteVolume),
+      highPrice: Number(t.highPrice),
+      lowPrice: Number(t.lowPrice),
+      weightedAvgPrice: Number(t.weightedAvgPrice),
+      count: Number(t.count) // Number of trades
+    }));
+
+  // Find coins with high volume but modest price change (< 10%)
+  // These are potentially accumulating before a bigger move
+  const surgers = tickers
+    .filter((t) =>
+      t.volume > 500_000 && // Min $500K volume
+      t.count > 5000 && // Min 5000 trades (active interest)
+      Math.abs(t.priceChangePercent) >= 1 && // At least moving
+      Math.abs(t.priceChangePercent) <= 15 // But hasn't fully pumped yet
+    )
+    .map((t) => {
+      // Estimate "volume intensity" - high volume relative to modest price change
+      // Higher = more volume per unit of price move = accumulation
+      const volumePerPctMove = t.volume / Math.max(Math.abs(t.priceChangePercent), 0.1);
+      return { ...t, volumePerPctMove };
+    })
+    .sort((a, b) => b.volumePerPctMove - a.volumePerPctMove);
+
+  return surgers.slice(0, limit);
+}
+
 module.exports = {
   getFuturesSymbols,
   getUsdtPerpetualMarkets,
@@ -164,5 +202,6 @@ module.exports = {
   getSpotExchangeInfo,
   getSpotTickerPrice,
   getTopMovers,
-  getTopGainers
+  getTopGainers,
+  getVolumeSurgers
 };

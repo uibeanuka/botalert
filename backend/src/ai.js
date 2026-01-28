@@ -253,6 +253,25 @@ function predictNextMove(indicators, multiTimeframeData = null) {
       reasons.push('SNIPER: Squeeze - expecting big move');
     }
 
+    // Volume surge detection (meme/alpha pump catcher)
+    if (sniperSignals.volumeSurge?.detected) {
+      const surge = sniperSignals.volumeSurge;
+      const surgePoints = Math.min(25, surge.strength * 0.25);
+      if (surge.direction === 'bullish') {
+        bullScore += surgePoints;
+        reasons.push(`MEME SURGE: ${surge.intensity.toFixed(1)}x vol${surge.isExplosive ? ' EXPLOSIVE' : ''} (${surge.surgePct.toFixed(1)}%)`);
+      } else if (surge.direction === 'bearish') {
+        bearScore += surgePoints;
+        reasons.push(`DUMP SURGE: ${surge.intensity.toFixed(1)}x vol${surge.isExplosive ? ' EXPLOSIVE' : ''} (${surge.surgePct.toFixed(1)}%)`);
+      }
+      // Extra confidence bonus for explosive volume
+      if (surge.isExplosive) {
+        sniperBonus += 10;
+      } else {
+        sniperBonus += 5;
+      }
+    }
+
     // Track overall sniper score
     if (sniperSignals.score?.isSniper) {
       sniperBonus += 5;
@@ -310,7 +329,7 @@ function predictNextMove(indicators, multiTimeframeData = null) {
 
   // Calculate final scores and direction
   const totalScore = bullScore + bearScore;
-  const maxPossibleScore = 160; // Updated for sniper signals
+  const maxPossibleScore = 185; // Updated for sniper + volume surge signals
 
   let direction = 'neutral';
   let signal = 'HOLD';
@@ -372,6 +391,27 @@ function predictNextMove(indicators, multiTimeframeData = null) {
       }
     }
 
+    // Volume surge can generate signals even when other indicators are neutral
+    // Meme coins pump on volume before traditional indicators catch up
+    if (sniperSignals?.volumeSurge?.detected && sniperSignals?.volumeSurge?.strength >= 50) {
+      const surgeDir = sniperSignals.volumeSurge.direction;
+      if (surgeDir === 'bullish' && (signal === 'HOLD' || signal === 'LONG')) {
+        direction = 'long';
+        signal = sniperSignals.volumeSurge.isExplosive ? 'STRONG_LONG' : 'SNIPER_LONG';
+        confidence += sniperSignals.volumeSurge.isExplosive ? 0.08 : 0.04;
+        if (!reasons.some(r => r.includes('MEME SURGE'))) {
+          reasons.push('VOLUME SURGE: Early meme/alpha entry');
+        }
+      } else if (surgeDir === 'bearish' && (signal === 'HOLD' || signal === 'SHORT')) {
+        direction = 'short';
+        signal = sniperSignals.volumeSurge.isExplosive ? 'STRONG_SHORT' : 'SNIPER_SHORT';
+        confidence += sniperSignals.volumeSurge.isExplosive ? 0.08 : 0.04;
+        if (!reasons.some(r => r.includes('DUMP SURGE'))) {
+          reasons.push('VOLUME SURGE: Early dump detection');
+        }
+      }
+    }
+
     // Sniper can also generate signals when scores are close but sniper conviction is high
     // This handles the case where bullScore ~ bearScore (no clear winner) but sniper sees early setup
     if (signal === 'HOLD' && sniperSignals?.score?.isSniper && sniperSignals?.score?.score >= 65) {
@@ -411,10 +451,12 @@ function predictNextMove(indicators, multiTimeframeData = null) {
     // Include sniper analysis
     sniperAnalysis: sniperSignals ? {
       isSniper: sniperSignals.score?.isSniper || false,
+      isVolumeSurge: sniperSignals.score?.isVolumeSurge || false,
       direction: sniperSignals.score?.direction,
       signals: sniperSignals.score?.signals || [],
       divergence: sniperSignals.divergence?.type,
-      squeeze: sniperSignals.squeeze?.inSqueeze
+      squeeze: sniperSignals.squeeze?.inSqueeze,
+      volumeSurge: sniperSignals.volumeSurge || null
     } : null,
     // Pattern memory
     patternMatch: patternMatch?.found ? {
