@@ -3,12 +3,12 @@ const { calculateIndicators } = require('./indicators');
 const { predictNextMove } = require('./ai');
 
 const DEFAULT_DCA_SYMBOLS = [
-  'FARTCOINUSDC',
-  'ASTERUSDC',
-  'GIGGLEUSDC',
-  'TRADOORUSDC',
-  '1000BONKUSDC',
-  'ORDIUSDC'
+  { symbol: 'ASTERUSDC', category: 'spot' },
+  { symbol: 'GIGGLEUSDC', category: 'spot' },
+  { symbol: 'ORDIUSDC', category: 'spot' },
+  { symbol: 'FARTCOINUSDC', category: 'alpha' },
+  { symbol: 'TRADOORUSDC', category: 'alpha' },
+  { symbol: '1000BONKUSDC', category: 'alpha' }
 ];
 
 const DEFAULT_INTERVAL = '1h';
@@ -17,7 +17,13 @@ const DEFAULT_BUDGET = 100;
 function normalizeSymbols(rawSymbols) {
   if (!rawSymbols) return [];
   return rawSymbols
-    .map((s) => (s || '').trim().toUpperCase())
+    .map((s) => {
+      if (typeof s === 'object' && s.symbol) {
+        return { symbol: s.symbol.trim().toUpperCase(), category: s.category || 'spot' };
+      }
+      const sym = (s || '').trim().toUpperCase();
+      return sym ? { symbol: sym, category: 'spot' } : null;
+    })
     .filter(Boolean);
 }
 
@@ -73,11 +79,12 @@ function detectReentry(indicators, action) {
   return Boolean(wasDowntrend && bullishFlip);
 }
 
-function buildDcaItem(symbol, interval, candles, indicators, ai) {
+function buildDcaItem(symbol, interval, candles, indicators, ai, category) {
   if (!candles || candles.length < 20 || !indicators || !ai) {
     return {
       symbol,
       base: symbol.replace('USDC', ''),
+      category: category || 'spot',
       interval,
       action: 'NO_DATA',
       confidence: null,
@@ -97,6 +104,7 @@ function buildDcaItem(symbol, interval, candles, indicators, ai) {
   return {
     symbol,
     base: symbol.replace('USDC', ''),
+    category: category || 'spot',
     interval,
     action,
     confidence: roundMoney(confidence, 2),
@@ -193,12 +201,14 @@ async function buildDcaPlan({ symbols, interval, budget, latestCandles }) {
   const resolvedBudget = Number.isFinite(budget) ? budget : DEFAULT_BUDGET;
 
   const items = [];
-  for (const symbol of targetSymbols) {
-    const key = `${symbol}-${resolvedInterval}`;
+  for (const entry of targetSymbols) {
+    const sym = typeof entry === 'object' ? entry.symbol : entry;
+    const category = typeof entry === 'object' ? entry.category : 'spot';
+    const key = `${sym}-${resolvedInterval}`;
     let candles = latestCandles?.get(key);
     if (!candles || candles.length < 20) {
       try {
-        candles = await getSpotCandles(symbol, resolvedInterval);
+        candles = await getSpotCandles(sym, resolvedInterval);
       } catch (err) {
         candles = null;
       }
@@ -206,7 +216,7 @@ async function buildDcaPlan({ symbols, interval, budget, latestCandles }) {
 
     const indicators = candles ? calculateIndicators(candles) : null;
     const ai = indicators ? predictNextMove(indicators) : null;
-    items.push(buildDcaItem(symbol, resolvedInterval, candles, indicators, ai));
+    items.push(buildDcaItem(sym, resolvedInterval, candles, indicators, ai, category));
   }
 
   const allocation = allocateBudget(items, resolvedBudget);

@@ -1203,6 +1203,25 @@ a:hover {
   font-size: 0.8rem;
 }
 
+.dca-section-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+  margin-top: var(--space-lg);
+}
+
+.dca-section-header:first-of-type {
+  margin-top: 0;
+}
+
+.dca-section-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.02em;
+}
+
 .dca-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));

@@ -5,12 +5,12 @@ import ChatWidget from '../components/ChatWidget';
 import { fetchDcaPlan } from '../lib/api';
 
 const TARGET_SYMBOLS = [
-  'FARTCOINUSDC',
-  'ASTERUSDC',
-  'GIGGLEUSDC',
-  'TRADOORUSDC',
-  '1000BONKUSDC',
-  'ORDIUSDC'
+  { symbol: 'ASTERUSDC', category: 'spot' },
+  { symbol: 'GIGGLEUSDC', category: 'spot' },
+  { symbol: 'ORDIUSDC', category: 'spot' },
+  { symbol: 'FARTCOINUSDC', category: 'alpha' },
+  { symbol: 'TRADOORUSDC', category: 'alpha' },
+  { symbol: '1000BONKUSDC', category: 'alpha' }
 ];
 
 const INTERVAL_OPTIONS = ['1h', '4h', '1d'];
@@ -59,9 +59,9 @@ export default function DcaPage() {
   return (
     <div className="page with-bottom-nav">
       <Head>
-        <title>FuturesAI - Spot DCA Planner</title>
+        <title>FuturesAI - Spot &amp; Alpha DCA Planner</title>
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-        <meta name="description" content="Spot DCA planner and market flow signals for key tokens." />
+        <meta name="description" content="Spot &amp; Alpha DCA planner with market flow signals." />
         <meta name="theme-color" content="#0a0e17" />
       </Head>
 
@@ -78,7 +78,7 @@ export default function DcaPage() {
             </div>
             <div className="status-badge">
               <span className="status-dot"></span>
-              Spot DCA
+              Spot &amp; Alpha DCA
             </div>
           </div>
           <div className="header-right">
@@ -124,22 +124,45 @@ export default function DcaPage() {
               <div className="dca-control">
                 <span className="dca-control-label">Strategy</span>
                 <div className="dca-control-value">Trend + candle flow</div>
-                <span className="dca-control-meta">Spot only • USDC reserve active</span>
+                <span className="dca-control-meta">Spot + Alpha • USDC reserve active</span>
               </div>
             </div>
             {error && <div className="dca-error">{error}</div>}
           </div>
 
-          <div className="dca-grid">
-            {plan?.items?.map((item) => (
-              <DcaCoinCard key={item.symbol} item={item} />
-            ))}
-            {!plan && !isLoading && (
-              <div className="card dca-card">
-                <div className="dca-empty">No plan yet. Adjust budget or refresh.</div>
+          {plan?.items?.some((item) => item.category === 'spot') && (
+            <>
+              <div className="dca-section-header">
+                <span className="dca-section-title">Spot Holdings</span>
+                <span className="tag tag-neutral">SPOT</span>
               </div>
-            )}
-          </div>
+              <div className="dca-grid">
+                {plan.items.filter((item) => item.category === 'spot').map((item) => (
+                  <DcaCoinCard key={item.symbol} item={item} />
+                ))}
+              </div>
+            </>
+          )}
+
+          {plan?.items?.some((item) => item.category === 'alpha') && (
+            <>
+              <div className="dca-section-header">
+                <span className="dca-section-title">Alpha Holdings</span>
+                <span className="tag tag-short">ALPHA</span>
+              </div>
+              <div className="dca-grid">
+                {plan.items.filter((item) => item.category === 'alpha').map((item) => (
+                  <DcaCoinCard key={item.symbol} item={item} />
+                ))}
+              </div>
+            </>
+          )}
+
+          {!plan && !isLoading && (
+            <div className="card dca-card">
+              <div className="dca-empty">No plan yet. Adjust budget or refresh.</div>
+            </div>
+          )}
         </div>
 
         <div className="sidebar">
