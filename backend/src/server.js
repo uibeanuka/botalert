@@ -65,7 +65,7 @@ let pollers = [];
 
 configureWebPush();
 bootstrapTracking();
-startSpotDcaEngine({ latestCandles });
+startSpotDcaEngine({ latestCandles, latestSignals });
 
 io.on('connection', (socket) => {
   socket.emit('bootstrap', {

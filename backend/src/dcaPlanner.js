@@ -27,13 +27,18 @@ function roundMoney(value, decimals = 2) {
   return Math.round(value * factor) / factor;
 }
 
-function buildAction(ai) {
+function buildAction(ai, sniperSignals) {
   const confidence = ai?.confidence ?? 0.5;
-  if (ai?.direction === 'long' && confidence >= 0.55) {
-    return { action: 'ACCUMULATE', confidence };
+  const isSniper = sniperSignals?.score?.isSniper || false;
+  const sniperDir = sniperSignals?.score?.direction;
+
+  if (ai?.direction === 'long') {
+    const threshold = (isSniper && sniperDir === 'bullish') ? 0.48 : 0.55;
+    if (confidence >= threshold) return { action: 'ACCUMULATE', confidence };
   }
-  if (ai?.direction === 'short' && confidence >= 0.55) {
-    return { action: 'SWAP_TO_USDC', confidence };
+  if (ai?.direction === 'short') {
+    const threshold = (isSniper && sniperDir === 'bearish') ? 0.48 : 0.55;
+    if (confidence >= threshold) return { action: 'SWAP_TO_USDC', confidence };
   }
   return { action: 'WAIT', confidence };
 }
@@ -84,9 +89,10 @@ function buildDcaItem(symbol, interval, candles, indicators, ai) {
     };
   }
 
-  const { action, confidence } = buildAction(ai);
+  const { action, confidence } = buildAction(ai, indicators?.sniperSignals);
   const reentrySuggested = detectReentry(indicators, action);
   const trendDir = indicators?.trend?.direction || 'NEUTRAL';
+  const sniper = indicators?.sniperSignals;
 
   return {
     symbol,
@@ -104,7 +110,20 @@ function buildDcaItem(symbol, interval, candles, indicators, ai) {
         shape: indicators.midweekReversal.shape,
         strength: indicators.midweekReversal.strength
       }
-      : null
+      : null,
+    sniperScore: sniper?.score?.score || 0,
+    isSniper: sniper?.score?.isSniper || false,
+    sniperDirection: sniper?.score?.direction || null,
+    sniperSignals: sniper?.score?.signals || [],
+    sniperDetail: {
+      divergence: sniper?.divergence || null,
+      volumeAccumulation: sniper?.volumeAccumulation || null,
+      earlyBreakout: sniper?.earlyBreakout || null,
+      momentumBuilding: sniper?.momentumBuilding || null,
+      squeeze: sniper?.squeeze || null,
+    },
+    aiSignal: ai?.signal || 'HOLD',
+    aiTrade: ai?.trade || null,
   };
 }
 
@@ -117,7 +136,11 @@ function allocateBudget(items, budget) {
   const investablePct = Math.max(0, 100 - reservePct);
 
   const weights = actionable.map((item) => {
-    if (item.action === 'ACCUMULATE') return 1.1 + (item.confidence ?? 0.5);
+    if (item.action === 'ACCUMULATE') {
+      let w = 1.1 + (item.confidence ?? 0.5);
+      if (item.isSniper && item.sniperDirection === 'bullish') w += 0.4;
+      return w;
+    }
     if (item.action === 'WAIT') return 0.4 + (item.confidence ?? 0.5) * 0.3;
     return 0;
   });
