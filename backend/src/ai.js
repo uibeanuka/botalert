@@ -359,37 +359,52 @@ function predictNextMove(indicators, multiTimeframeData = null) {
     // Midweek reversal caution (small penalty)
     confidence -= midweekCaution;
 
-    // Determine direction and signal
-    if (bullScore > bearScore) {
-      direction = 'long';
-      if (bullScore >= 40 && scoreDiff >= 15) {
-        signal = 'LONG';
-        if (bullScore >= 60 && scoreDiff >= 25) {
-          signal = 'STRONG_LONG';
-          confidence += 0.05;
+    // === HYSTERESIS FIX: Prevent flip-flopping on small score changes ===
+    // Option 1: Require ≥10 point score difference to set a directional bias
+    // Option 3: Neutral zone - if scores within 15 points, stay HOLD (no signal)
+    const MIN_DIFF_FOR_DIRECTION = 10;  // Minimum to change direction
+    const NEUTRAL_ZONE_THRESHOLD = 15;  // Minimum for actionable signal
+
+    // Determine direction only if score difference is significant enough
+    if (scoreDiff >= MIN_DIFF_FOR_DIRECTION) {
+      if (bullScore > bearScore) {
+        direction = 'long';
+        // Only generate signal if outside neutral zone
+        if (scoreDiff >= NEUTRAL_ZONE_THRESHOLD && bullScore >= 40) {
+          signal = 'LONG';
+          if (bullScore >= 60 && scoreDiff >= 25) {
+            signal = 'STRONG_LONG';
+            confidence += 0.05;
+          }
+        }
+        // SNIPER signal: upgrade any signal (HOLD/LONG/STRONG_LONG → SNIPER_LONG)
+        // Also allows sniper to generate entries when base scores are below threshold
+        if (sniperSignals?.score?.isSniper && sniperSignals?.score?.direction === 'bullish') {
+          signal = 'SNIPER_LONG';
+          confidence += 0.03;
+        }
+      } else if (bearScore > bullScore) {
+        direction = 'short';
+        // Only generate signal if outside neutral zone
+        if (scoreDiff >= NEUTRAL_ZONE_THRESHOLD && bearScore >= 40) {
+          signal = 'SHORT';
+          if (bearScore >= 60 && scoreDiff >= 25) {
+            signal = 'STRONG_SHORT';
+            confidence += 0.05;
+          }
+        }
+        // SNIPER signal: upgrade any signal (HOLD/SHORT/STRONG_SHORT → SNIPER_SHORT)
+        if (sniperSignals?.score?.isSniper && sniperSignals?.score?.direction === 'bearish') {
+          signal = 'SNIPER_SHORT';
+          confidence += 0.03;
         }
       }
-      // SNIPER signal: upgrade any signal (HOLD/LONG/STRONG_LONG → SNIPER_LONG)
-      // Also allows sniper to generate entries when base scores are below threshold
-      if (sniperSignals?.score?.isSniper && sniperSignals?.score?.direction === 'bullish') {
-        signal = 'SNIPER_LONG';
-        confidence += 0.03;
-      }
-    } else if (bearScore > bullScore) {
-      direction = 'short';
-      if (bearScore >= 40 && scoreDiff >= 15) {
-        signal = 'SHORT';
-        if (bearScore >= 60 && scoreDiff >= 25) {
-          signal = 'STRONG_SHORT';
-          confidence += 0.05;
-        }
-      }
-      // SNIPER signal: upgrade any signal (HOLD/SHORT/STRONG_SHORT → SNIPER_SHORT)
-      if (sniperSignals?.score?.isSniper && sniperSignals?.score?.direction === 'bearish') {
-        signal = 'SNIPER_SHORT';
-        confidence += 0.03;
-      }
+    } else {
+      // Scores too close - add reason for neutral stance
+      reasons.push(`Mixed signals (bull: ${bullScore}, bear: ${bearScore}, diff: ${scoreDiff})`);
     }
+    // scoreDiff < 10: direction stays 'neutral', signal stays 'HOLD'
+    // This prevents flip-flopping when bull/bear scores are close
 
     // Volume surge can generate signals even when other indicators are neutral
     // Meme coins pump on volume before traditional indicators catch up
