@@ -13,6 +13,11 @@ export default function AIInsights() {
   const [patterns, setPatterns] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('overview');
+  // New sentiment & market data
+  const [marketSentiment, setMarketSentiment] = useState(null);
+  const [whales, setWhales] = useState(null);
+  const [funding, setFunding] = useState(null);
+  const [intelligence, setIntelligence] = useState(null);
 
   useEffect(() => {
     loadData();
@@ -28,14 +33,20 @@ export default function AIInsights() {
 
   async function loadData() {
     try {
-      const [insightsRes, mlRes, riskRes] = await Promise.all([
+      const [insightsRes, mlRes, riskRes, sentimentRes, whalesRes, fundingRes] = await Promise.all([
         fetch(`${API_BASE}/api/ai/learning`).then(r => r.json()),
         fetch(`${API_BASE}/api/ai/ml-stats`).then(r => r.json()),
-        fetch(`${API_BASE}/api/ai/risk-status`).then(r => r.json())
+        fetch(`${API_BASE}/api/ai/risk-status`).then(r => r.json()),
+        fetch(`${API_BASE}/api/sentiment`).then(r => r.json()).catch(() => null),
+        fetch(`${API_BASE}/api/whales`).then(r => r.json()).catch(() => null),
+        fetch(`${API_BASE}/api/funding`).then(r => r.json()).catch(() => null)
       ]);
       setInsights(insightsRes);
       setMlStats(mlRes);
       setRiskStatus(riskRes);
+      setMarketSentiment(sentimentRes);
+      setWhales(whalesRes);
+      setFunding(fundingRes);
     } catch (err) {
       console.error('Failed to load AI data:', err);
     } finally {
@@ -45,12 +56,14 @@ export default function AIInsights() {
 
   async function loadSymbolAnalysis(symbol) {
     try {
-      const [analysisRes, patternsRes] = await Promise.all([
+      const [analysisRes, patternsRes, intelRes] = await Promise.all([
         fetch(`${API_BASE}/api/ai/full-analysis/${symbol}`).then(r => r.json()),
-        fetch(`${API_BASE}/api/ai/patterns/${symbol}`).then(r => r.json())
+        fetch(`${API_BASE}/api/ai/patterns/${symbol}`).then(r => r.json()),
+        fetch(`${API_BASE}/api/intelligence/${symbol}`).then(r => r.json()).catch(() => null)
       ]);
       setFullAnalysis(analysisRes);
       setPatterns(patternsRes);
+      setIntelligence(intelRes);
     } catch (err) {
       console.error('Failed to load symbol analysis:', err);
     }
@@ -76,6 +89,7 @@ export default function AIInsights() {
         <div className="tabs">
           <button className={activeTab === 'overview' ? 'active' : ''} onClick={() => setActiveTab('overview')}>Overview</button>
           <button className={activeTab === 'analysis' ? 'active' : ''} onClick={() => setActiveTab('analysis')}>Analysis</button>
+          <button className={activeTab === 'sentiment' ? 'active' : ''} onClick={() => setActiveTab('sentiment')}>Sentiment</button>
           <button className={activeTab === 'learning' ? 'active' : ''} onClick={() => setActiveTab('learning')}>Learning</button>
           <button className={activeTab === 'risk' ? 'active' : ''} onClick={() => setActiveTab('risk')}>Risk</button>
         </div>
@@ -335,6 +349,165 @@ export default function AIInsights() {
                     </div>
                   ))}
                 </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'sentiment' && (
+          <div className="sentiment-section">
+            {/* Fear & Greed Index */}
+            <div className="card fear-greed-card">
+              <h3>Fear & Greed Index</h3>
+              <div className={`fear-greed-value ${
+                marketSentiment?.market?.fearGreed?.value <= 25 ? 'extreme-fear' :
+                marketSentiment?.market?.fearGreed?.value <= 45 ? 'fear' :
+                marketSentiment?.market?.fearGreed?.value <= 55 ? 'neutral' :
+                marketSentiment?.market?.fearGreed?.value <= 75 ? 'greed' : 'extreme-greed'
+              }`}>
+                <span className="number">{marketSentiment?.market?.fearGreed?.value || '--'}</span>
+                <span className="label">{marketSentiment?.market?.fearGreed?.classification || 'Loading...'}</span>
+              </div>
+              {marketSentiment?.market?.fearGreed?.trend && (
+                <div className="trend">Trend: {marketSentiment.market.fearGreed.trend.replace('_', ' ')}</div>
+              )}
+            </div>
+
+            {/* News Sentiment */}
+            <div className="card news-card">
+              <h3>News Sentiment</h3>
+              <div className={`news-flow ${marketSentiment?.market?.newsFlow}`}>
+                {marketSentiment?.market?.newsFlow?.toUpperCase() || 'NEUTRAL'}
+              </div>
+              <div className="news-list">
+                {marketSentiment?.topNews?.slice(0, 5).map((news, i) => (
+                  <div key={i} className={`news-item ${news.sentiment}`}>
+                    <span className="sentiment-dot"></span>
+                    <span className="title">{news.title}</span>
+                    <span className="source">{news.source}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Whale Activity */}
+            <div className="card whale-card">
+              <h3>Whale Activity</h3>
+              <div className="whale-stats">
+                <div className="stat">
+                  <span className="label">Transactions</span>
+                  <span className="value">{whales?.count || 0}</span>
+                </div>
+                <div className="stat">
+                  <span className="label">Total Volume</span>
+                  <span className="value">${((whales?.summary?.totalVolume || 0) / 1000000).toFixed(1)}M</span>
+                </div>
+                <div className="stat">
+                  <span className="label">Net Flow</span>
+                  <span className={`value ${(whales?.summary?.netFlow || 0) > 0 ? 'green' : 'red'}`}>
+                    ${((whales?.summary?.netFlow || 0) / 1000000).toFixed(1)}M
+                  </span>
+                </div>
+                <div className="stat">
+                  <span className="label">Signal</span>
+                  <span className={`value ${whales?.summary?.marketSignal?.includes('bullish') ? 'green' : whales?.summary?.marketSignal?.includes('bearish') ? 'red' : ''}`}>
+                    {whales?.summary?.marketSignal?.toUpperCase() || 'NEUTRAL'}
+                  </span>
+                </div>
+              </div>
+              <div className="whale-alerts">
+                {whales?.alerts?.slice(0, 5).map((alert, i) => (
+                  <div key={i} className={`whale-alert ${alert.signal?.bias}`}>
+                    <span className="symbol">{alert.symbol}</span>
+                    <span className="amount">${(alert.amountUsd / 1000000).toFixed(1)}M</span>
+                    <span className="type">{alert.flowType?.replace('_', ' ')}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Funding Rates */}
+            <div className="card funding-card">
+              <h3>Funding Rates</h3>
+              <div className="funding-summary">
+                <div className="stat">
+                  <span className="label">Market Sentiment</span>
+                  <span className={`value ${funding?.summary?.marketSentiment?.includes('bullish') ? 'green' : funding?.summary?.marketSentiment?.includes('bearish') ? 'red' : ''}`}>
+                    {funding?.summary?.marketSentiment?.replace('_', ' ').toUpperCase() || 'NEUTRAL'}
+                  </span>
+                </div>
+                <div className="stat">
+                  <span className="label">Avg Funding</span>
+                  <span className="value">{funding?.summary?.averageFunding?.ratePercent || '0%'}</span>
+                </div>
+                <div className="stat">
+                  <span className="label">Extreme Count</span>
+                  <span className="value">{funding?.summary?.distribution?.extremeCount || 0}</span>
+                </div>
+              </div>
+              {funding?.summary?.contrarianSignal && (
+                <div className={`contrarian-signal ${funding.summary.contrarianSignal.direction}`}>
+                  <span className="direction">{funding.summary.contrarianSignal.direction.toUpperCase()}</span>
+                  <span className="reason">{funding.summary.contrarianSignal.reason}</span>
+                </div>
+              )}
+              <div className="extreme-list">
+                <h4>Extreme Funding</h4>
+                {funding?.extremes?.slice(0, 5).map((ext, i) => (
+                  <div key={i} className={`extreme-item ${ext.direction}`}>
+                    <span className="symbol">{ext.symbol}</span>
+                    <span className="rate">{ext.ratePercent}</span>
+                    <span className="signal">{ext.signal?.replace('_', ' ')}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Symbol Intelligence */}
+            {intelligence && (
+              <div className="card intelligence-card full-width">
+                <h3>Combined Intelligence: {selectedSymbol}</h3>
+                <div className={`combined-signal ${intelligence.combined?.signal?.toLowerCase()}`}>
+                  <span className="signal">{intelligence.combined?.signal}</span>
+                  <span className="confidence">{intelligence.combined?.confidence}% confidence</span>
+                </div>
+                <div className="intel-grid">
+                  <div className="intel-item">
+                    <span className="label">Fear & Greed</span>
+                    <span className="value">{intelligence.sentiment?.fearGreed?.value} - {intelligence.sentiment?.fearGreed?.classification}</span>
+                  </div>
+                  <div className="intel-item">
+                    <span className="label">News</span>
+                    <span className={`value ${intelligence.sentiment?.news?.sentiment}`}>{intelligence.sentiment?.news?.count} articles - {intelligence.sentiment?.news?.sentiment}</span>
+                  </div>
+                  <div className="intel-item">
+                    <span className="label">Whale Flow</span>
+                    <span className={`value ${intelligence.whales?.signal?.includes('bullish') ? 'green' : intelligence.whales?.signal?.includes('bearish') ? 'red' : ''}`}>
+                      ${((intelligence.whales?.netFlow || 0) / 1000000).toFixed(2)}M - {intelligence.whales?.signal || 'neutral'}
+                    </span>
+                  </div>
+                  <div className="intel-item">
+                    <span className="label">Funding</span>
+                    <span className={`value ${intelligence.funding?.signal?.includes('bullish') ? 'green' : intelligence.funding?.signal?.includes('bearish') ? 'red' : ''}`}>
+                      {intelligence.funding?.rate} - {intelligence.funding?.signal || 'neutral'}
+                    </span>
+                  </div>
+                  <div className="intel-item">
+                    <span className="label">Long/Short Ratio</span>
+                    <span className="value">{intelligence.funding?.leverage?.toFixed(2) || 'N/A'}</span>
+                  </div>
+                </div>
+                {intelligence.recommendations?.length > 0 && (
+                  <div className="intel-recommendations">
+                    <h4>Recommendations</h4>
+                    {intelligence.recommendations.map((rec, i) => (
+                      <div key={i} className={`recommendation ${rec.priority}`}>
+                        <span className="type">{rec.type}</span>
+                        <span className="message">{rec.message}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -837,6 +1010,220 @@ const styles = `
 
   .weight.bullish { color: #4caf50; }
   .weight.bearish { color: #f44336; }
+
+  /* Sentiment Tab Styles */
+  .sentiment-section {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 1rem;
+  }
+
+  .fear-greed-value {
+    text-align: center;
+    padding: 1.5rem;
+    border-radius: 12px;
+    margin-bottom: 0.5rem;
+  }
+
+  .fear-greed-value .number {
+    font-size: 3rem;
+    font-weight: bold;
+    display: block;
+  }
+
+  .fear-greed-value .label {
+    font-size: 1.1rem;
+    opacity: 0.9;
+  }
+
+  .fear-greed-value.extreme-fear { background: linear-gradient(135deg, #b71c1c, #880e0e); }
+  .fear-greed-value.fear { background: linear-gradient(135deg, #e65100, #bf360c); }
+  .fear-greed-value.neutral { background: linear-gradient(135deg, #616161, #424242); }
+  .fear-greed-value.greed { background: linear-gradient(135deg, #2e7d32, #1b5e20); }
+  .fear-greed-value.extreme-greed { background: linear-gradient(135deg, #1b5e20, #0d3d0f); }
+
+  .trend {
+    text-align: center;
+    color: #888;
+    text-transform: capitalize;
+  }
+
+  .news-flow {
+    text-align: center;
+    padding: 0.75rem;
+    border-radius: 8px;
+    font-weight: bold;
+    margin-bottom: 1rem;
+  }
+
+  .news-flow.bullish { background: #1b5e20; }
+  .news-flow.bearish { background: #b71c1c; }
+  .news-flow.neutral { background: #424242; }
+
+  .news-list {
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .news-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.5rem;
+    border-radius: 6px;
+    margin-bottom: 0.5rem;
+    background: #0a0e17;
+    font-size: 0.85rem;
+  }
+
+  .news-item .sentiment-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-top: 0.3rem;
+    flex-shrink: 0;
+  }
+
+  .news-item.bullish .sentiment-dot { background: #4caf50; }
+  .news-item.bearish .sentiment-dot { background: #f44336; }
+  .news-item.neutral .sentiment-dot { background: #888; }
+
+  .news-item .title {
+    flex: 1;
+    line-height: 1.3;
+  }
+
+  .news-item .source {
+    color: #666;
+    font-size: 0.75rem;
+    white-space: nowrap;
+  }
+
+  .whale-stats {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+
+  .whale-alerts {
+    max-height: 200px;
+    overflow-y: auto;
+  }
+
+  .whale-alert {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.5rem;
+    border-radius: 6px;
+    margin-bottom: 0.5rem;
+    background: #0a0e17;
+    font-size: 0.85rem;
+  }
+
+  .whale-alert.bullish { border-left: 3px solid #4caf50; }
+  .whale-alert.bearish { border-left: 3px solid #f44336; }
+
+  .whale-alert .symbol { font-weight: bold; }
+  .whale-alert .amount { color: #2962ff; }
+  .whale-alert .type { color: #888; text-transform: capitalize; }
+
+  .funding-summary {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+
+  .contrarian-signal {
+    padding: 0.75rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+
+  .contrarian-signal.bullish { background: rgba(76, 175, 80, 0.2); border: 1px solid #4caf50; }
+  .contrarian-signal.bearish { background: rgba(244, 67, 54, 0.2); border: 1px solid #f44336; }
+
+  .contrarian-signal .direction {
+    font-weight: bold;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+  }
+
+  .contrarian-signal.bullish .direction { background: #1b5e20; }
+  .contrarian-signal.bearish .direction { background: #b71c1c; }
+
+  .extreme-list h4 {
+    font-size: 0.9rem;
+    color: #888;
+    margin-bottom: 0.5rem;
+  }
+
+  .extreme-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.5rem;
+    border-radius: 6px;
+    margin-bottom: 0.5rem;
+    background: #0a0e17;
+    font-size: 0.85rem;
+  }
+
+  .extreme-item.overleveraged_long { border-left: 3px solid #f44336; }
+  .extreme-item.overleveraged_short { border-left: 3px solid #4caf50; }
+
+  .extreme-item .signal { color: #888; text-transform: capitalize; }
+
+  .intelligence-card .combined-signal {
+    text-align: center;
+    padding: 1rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+  }
+
+  .combined-signal.strong_long, .combined-signal.long { background: #1b5e20; }
+  .combined-signal.strong_short, .combined-signal.short { background: #b71c1c; }
+  .combined-signal.hold { background: #424242; }
+
+  .combined-signal .signal {
+    font-size: 1.5rem;
+    font-weight: bold;
+    display: block;
+  }
+
+  .intel-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+
+  .intel-item {
+    padding: 0.75rem;
+    background: #0a0e17;
+    border-radius: 6px;
+  }
+
+  .intel-item .label {
+    display: block;
+    color: #888;
+    font-size: 0.8rem;
+    margin-bottom: 0.25rem;
+  }
+
+  .intel-recommendations {
+    border-top: 1px solid #2a2f3e;
+    padding-top: 1rem;
+  }
+
+  .intel-recommendations h4 {
+    font-size: 0.9rem;
+    color: #888;
+    margin-bottom: 0.5rem;
+  }
 
   @media (max-width: 600px) {
     .levels-grid {

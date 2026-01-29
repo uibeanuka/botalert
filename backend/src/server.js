@@ -21,6 +21,11 @@ const { runBacktest, loadBacktestHistory, runMonteCarloSimulation } = require('.
 const { calculatePositionSize, getRiskStatus, recordTrade, checkTradingAllowed, calculateKellySize, resetLimits, setRiskMultiplier } = require('./riskManager');
 const { learnFromTrade, getLearningInsights, getLearnedRecommendation, getOptimalTradingHours, getOptimalTradingDays } = require('./aiLearning');
 
+// Sentiment & Market Intelligence modules
+const { fetchFearGreedIndex, fetchCryptoNews, getSymbolSentiment, getMarketSentiment } = require('./sentimentEngine');
+const { fetchWhaleAlerts, getSymbolWhaleActivity } = require('./whaleAlerts');
+const { fetchFundingRates, getSymbolFunding, getLeverageAnalysis, fetchLongShortRatio } = require('./fundingRates');
+
 const PORT = Number(process.env.PORT || 5000);
 const POLL_MS = Number(process.env.POLL_MS || 15_000);
 // If SYMBOLS is "ALL" or empty, auto-discover all futures symbols
@@ -631,6 +636,216 @@ app.get('/api/ai/full-analysis/:symbol', async (req, res) => {
     res.status(500).json({ error: 'Full analysis failed', message: error.message });
   }
 });
+
+// ============ SENTIMENT & MARKET INTELLIGENCE ENDPOINTS ============
+
+// Fear & Greed Index
+app.get('/api/sentiment/fear-greed', async (_req, res) => {
+  try {
+    const data = await fetchFearGreedIndex();
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch Fear & Greed', message: error.message });
+  }
+});
+
+// Crypto News
+app.get('/api/sentiment/news', async (req, res) => {
+  try {
+    const symbol = req.query.symbol?.toString() || null;
+    const data = await fetchCryptoNews(symbol);
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch news', message: error.message });
+  }
+});
+
+// Symbol Sentiment Analysis
+app.get('/api/sentiment/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const data = await getSymbolSentiment(symbol);
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Sentiment analysis failed', message: error.message });
+  }
+});
+
+// Market-wide Sentiment
+app.get('/api/sentiment', async (_req, res) => {
+  try {
+    const data = await getMarketSentiment();
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Market sentiment failed', message: error.message });
+  }
+});
+
+// Whale Alerts
+app.get('/api/whales', async (req, res) => {
+  try {
+    const minValue = Number(req.query.min || 1000000);
+    const data = await fetchWhaleAlerts(minValue);
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Whale alerts failed', message: error.message });
+  }
+});
+
+// Symbol Whale Activity
+app.get('/api/whales/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const data = await getSymbolWhaleActivity(symbol);
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Whale analysis failed', message: error.message });
+  }
+});
+
+// Funding Rates (all symbols)
+app.get('/api/funding', async (_req, res) => {
+  try {
+    const data = await fetchFundingRates();
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Funding rates failed', message: error.message });
+  }
+});
+
+// Symbol Funding Analysis
+app.get('/api/funding/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const data = await getSymbolFunding(symbol);
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Funding analysis failed', message: error.message });
+  }
+});
+
+// Leverage Analysis (funding + OI + L/S ratio)
+app.get('/api/leverage/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const data = await getLeverageAnalysis(symbol);
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Leverage analysis failed', message: error.message });
+  }
+});
+
+// Long/Short Ratio
+app.get('/api/longshort/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const period = req.query.period?.toString() || '5m';
+    const data = await fetchLongShortRatio(symbol, period);
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Long/Short ratio failed', message: error.message });
+  }
+});
+
+// Combined Market Intelligence (all data sources)
+app.get('/api/intelligence/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const interval = (req.query.interval || '15m').toString();
+
+    // Fetch all data in parallel
+    const [
+      sentiment,
+      whales,
+      funding,
+      leverage,
+      candles
+    ] = await Promise.all([
+      getSymbolSentiment(symbol),
+      getSymbolWhaleActivity(symbol),
+      getSymbolFunding(symbol),
+      getLeverageAnalysis(symbol),
+      getCandles(symbol, interval, 200)
+    ]);
+
+    // Get technical analysis
+    const indicators = calculateIndicators(candles);
+    const standardAI = predictNextMove(indicators);
+    const mlSignal = generateMLSignal(indicators);
+    const patterns = detectChartPatterns(candles);
+    const sniper = analyzeSniperSetup(candles, indicators);
+
+    // Calculate combined signal with sentiment
+    const technicalBias = standardAI.direction === 'long' ? 1 : standardAI.direction === 'short' ? -1 : 0;
+    const sentimentBias = sentiment.combined?.score || 0;
+    const fundingBias = funding.current?.signal?.bias?.includes('bullish') ? 0.2 : funding.current?.signal?.bias?.includes('bearish') ? -0.2 : 0;
+    const whaleBias = whales.lastHour?.signal === 'bullish' ? 0.15 : whales.lastHour?.signal === 'bearish' ? -0.15 : 0;
+
+    const combinedScore = (technicalBias * 0.5) + (sentimentBias * 0.25) + (fundingBias * 0.15) + (whaleBias * 0.1);
+
+    let combinedSignal = 'HOLD';
+    if (combinedScore > 0.3) combinedSignal = 'STRONG_LONG';
+    else if (combinedScore > 0.15) combinedSignal = 'LONG';
+    else if (combinedScore < -0.3) combinedSignal = 'STRONG_SHORT';
+    else if (combinedScore < -0.15) combinedSignal = 'SHORT';
+
+    res.json({
+      symbol,
+      interval,
+      timestamp: Date.now(),
+
+      combined: {
+        signal: combinedSignal,
+        score: Math.round(combinedScore * 100) / 100,
+        confidence: Math.round(Math.abs(combinedScore) * 100)
+      },
+
+      technical: {
+        ai: {
+          signal: standardAI.signal,
+          confidence: standardAI.confidence,
+          direction: standardAI.direction
+        },
+        ml: {
+          signal: mlSignal.signal,
+          confidence: mlSignal.confidence
+        },
+        patterns: patterns.patterns?.length || 0,
+        sniper: sniper.hasSetup
+      },
+
+      sentiment: {
+        fearGreed: sentiment.fearGreed,
+        news: sentiment.news,
+        combined: sentiment.combined
+      },
+
+      whales: {
+        alerts: whales.lastHour?.transactionCount || 0,
+        netFlow: whales.lastHour?.netFlow || 0,
+        signal: whales.lastHour?.signal
+      },
+
+      funding: {
+        rate: funding.current?.ratePercent,
+        signal: funding.current?.signal?.bias,
+        leverage: leverage.longShortRatio?.longShortRatio
+      },
+
+      tradeLevels: standardAI.trade,
+
+      recommendations: [
+        ...(sentiment.recommendations || []),
+        ...(whales.recommendation || []),
+        ...(funding.recommendations || [])
+      ].slice(0, 5)
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Intelligence analysis failed', message: error.message });
+  }
+});
+
+// ============ END SENTIMENT ENDPOINTS ============
 
 // ============ END AI TRADING SYSTEM ENDPOINTS ============
 
