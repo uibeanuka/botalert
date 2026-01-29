@@ -13,6 +13,14 @@ const { handleChatMessage } = require('./chatHandler');
 const { getStats: getPatternStats, recordMissedOpportunity } = require('./patternMemory');
 const { startSpotDcaEngine, getSpotDcaStatus } = require('./spotDcaEngine');
 
+// AI Trading System modules
+const { detectChartPatterns } = require('./chartPatterns');
+const { generateMLSignal, addTrainingSample, getModelStats, getFeatureImportance, trainModel } = require('./mlSignalGenerator');
+const { analyzeSniperSetup, detectKillzone } = require('./sniperEngine');
+const { runBacktest, loadBacktestHistory, runMonteCarloSimulation } = require('./backtesting');
+const { calculatePositionSize, getRiskStatus, recordTrade, checkTradingAllowed, calculateKellySize, resetLimits, setRiskMultiplier } = require('./riskManager');
+const { learnFromTrade, getLearningInsights, getLearnedRecommendation, getOptimalTradingHours, getOptimalTradingDays } = require('./aiLearning');
+
 const PORT = Number(process.env.PORT || 5000);
 const POLL_MS = Number(process.env.POLL_MS || 15_000);
 // If SYMBOLS is "ALL" or empty, auto-discover all futures symbols
@@ -202,6 +210,429 @@ app.post('/api/trading/close/:symbol', async (req, res) => {
   const result = await closePosition(symbol, 'API request');
   res.json(result);
 });
+
+// ============ AI TRADING SYSTEM ENDPOINTS ============
+
+// Chart Pattern Detection
+app.get('/api/ai/patterns/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const interval = (req.query.interval || '1h').toString();
+    const key = buildKey(symbol, interval);
+
+    let candles = latestCandles.get(key);
+    if (!candles || candles.length < 50) {
+      candles = await getCandles(symbol, interval, 200);
+    }
+
+    const patterns = detectChartPatterns(candles);
+    res.json({ symbol, interval, ...patterns });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to detect patterns', message: error.message });
+  }
+});
+
+// ML Signal Generation
+app.get('/api/ai/ml-signal/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const interval = (req.query.interval || '15m').toString();
+    const key = buildKey(symbol, interval);
+
+    let candles = latestCandles.get(key);
+    if (!candles || candles.length < 50) {
+      candles = await getCandles(symbol, interval, 200);
+    }
+
+    const indicators = calculateIndicators(candles);
+    const mlSignal = generateMLSignal(indicators);
+    const standardSignal = predictNextMove(indicators);
+
+    res.json({
+      symbol,
+      interval,
+      mlSignal,
+      standardSignal: {
+        signal: standardSignal.signal,
+        confidence: standardSignal.confidence,
+        direction: standardSignal.direction
+      },
+      combined: {
+        signal: mlSignal.confidence > standardSignal.confidence ? mlSignal.signal : standardSignal.signal,
+        confidence: Math.max(mlSignal.confidence, standardSignal.confidence),
+        agreement: mlSignal.direction === standardSignal.direction
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to generate ML signal', message: error.message });
+  }
+});
+
+// ML Model Stats
+app.get('/api/ai/ml-stats', (_req, res) => {
+  try {
+    const stats = getModelStats();
+    const importance = getFeatureImportance();
+    res.json({ stats, featureImportance: importance });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get ML stats', message: error.message });
+  }
+});
+
+// Trigger ML Training
+app.post('/api/ai/ml-train', (_req, res) => {
+  try {
+    trainModel();
+    const stats = getModelStats();
+    res.json({ success: true, stats });
+  } catch (error) {
+    res.status(500).json({ error: 'Training failed', message: error.message });
+  }
+});
+
+// Sniper Entry Analysis
+app.get('/api/ai/sniper/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const interval = (req.query.interval || '15m').toString();
+    const key = buildKey(symbol, interval);
+
+    let candles = latestCandles.get(key);
+    if (!candles || candles.length < 50) {
+      candles = await getCandles(symbol, interval, 200);
+    }
+
+    const indicators = calculateIndicators(candles);
+    const sniperAnalysis = analyzeSniperSetup(candles, indicators);
+    const killzone = detectKillzone();
+
+    res.json({
+      symbol,
+      interval,
+      ...sniperAnalysis,
+      killzone
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Sniper analysis failed', message: error.message });
+  }
+});
+
+// Killzone Status
+app.get('/api/ai/killzone', (_req, res) => {
+  const killzone = detectKillzone();
+  res.json(killzone);
+});
+
+// Backtesting
+app.post('/api/ai/backtest', async (req, res) => {
+  try {
+    const { symbol, interval = '1h', options = {} } = req.body;
+
+    if (!symbol) {
+      return res.status(400).json({ error: 'Symbol is required' });
+    }
+
+    // Fetch historical candles (max available)
+    const candles = await getCandles(symbol.toUpperCase(), interval, 1000);
+
+    if (!candles || candles.length < 200) {
+      return res.status(400).json({ error: 'Insufficient historical data' });
+    }
+
+    const result = await runBacktest(candles, { name: `${symbol}_${interval}` }, options);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: 'Backtest failed', message: error.message });
+  }
+});
+
+// Backtest History
+app.get('/api/ai/backtest-history', (_req, res) => {
+  try {
+    const history = loadBacktestHistory();
+    res.json({ history });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to load backtest history', message: error.message });
+  }
+});
+
+// Monte Carlo Simulation
+app.post('/api/ai/monte-carlo', async (req, res) => {
+  try {
+    const { symbol, interval = '1h', simulations = 1000, options = {} } = req.body;
+
+    // First run a backtest to get trades
+    const candles = await getCandles(symbol.toUpperCase(), interval, 1000);
+    const backtestResult = await runBacktest(candles, { name: `${symbol}_monte_carlo` }, options);
+
+    if (!backtestResult.trades || backtestResult.trades.length < 10) {
+      return res.status(400).json({ error: 'Not enough trades for Monte Carlo simulation' });
+    }
+
+    const monteCarloResult = runMonteCarloSimulation(
+      backtestResult.trades,
+      options.initialCapital || 10000,
+      simulations
+    );
+
+    res.json({
+      backtest: backtestResult.summary,
+      monteCarlo: monteCarloResult
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Monte Carlo simulation failed', message: error.message });
+  }
+});
+
+// Risk Management Status
+app.get('/api/ai/risk-status', (_req, res) => {
+  try {
+    const status = getRiskStatus();
+    res.json(status);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get risk status', message: error.message });
+  }
+});
+
+// Calculate Position Size
+app.post('/api/ai/position-size', (req, res) => {
+  try {
+    const {
+      accountBalance,
+      entryPrice,
+      stopLossPrice,
+      confidence = 0.6,
+      signal = {},
+      historicalStats = {}
+    } = req.body;
+
+    if (!accountBalance || !entryPrice || !stopLossPrice) {
+      return res.status(400).json({ error: 'accountBalance, entryPrice, and stopLossPrice are required' });
+    }
+
+    const result = calculatePositionSize({
+      accountBalance,
+      entryPrice,
+      stopLossPrice,
+      confidence,
+      signal,
+      historicalStats
+    });
+
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: 'Position sizing failed', message: error.message });
+  }
+});
+
+// Kelly Criterion Calculator
+app.post('/api/ai/kelly', (req, res) => {
+  try {
+    const { winRate, avgWin, avgLoss } = req.body;
+
+    if (winRate === undefined || avgWin === undefined || avgLoss === undefined) {
+      return res.status(400).json({ error: 'winRate, avgWin, and avgLoss are required' });
+    }
+
+    const kellyFraction = calculateKellySize(winRate, avgWin, avgLoss);
+
+    res.json({
+      kellyFraction: Math.round(kellyFraction * 10000) / 100, // As percentage
+      quarterKelly: Math.round(kellyFraction * 25 * 100) / 100,
+      halfKelly: Math.round(kellyFraction * 50 * 100) / 100,
+      recommendation: kellyFraction > 0.25 ? 'HIGH_EDGE' : kellyFraction > 0.1 ? 'MODERATE_EDGE' : 'LOW_EDGE'
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Kelly calculation failed', message: error.message });
+  }
+});
+
+// Reset Risk Limits
+app.post('/api/ai/risk-reset', (req, res) => {
+  try {
+    const { type = 'daily' } = req.body;
+    const status = resetLimits(type);
+    res.json({ success: true, status });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to reset limits', message: error.message });
+  }
+});
+
+// Set Risk Multiplier
+app.post('/api/ai/risk-multiplier', (req, res) => {
+  try {
+    const { multiplier } = req.body;
+    if (multiplier === undefined) {
+      return res.status(400).json({ error: 'multiplier is required' });
+    }
+    const newMultiplier = setRiskMultiplier(multiplier);
+    res.json({ success: true, riskMultiplier: newMultiplier });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to set risk multiplier', message: error.message });
+  }
+});
+
+// AI Learning Insights
+app.get('/api/ai/learning', (_req, res) => {
+  try {
+    const insights = getLearningInsights();
+    res.json(insights);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get learning insights', message: error.message });
+  }
+});
+
+// AI Learned Recommendation
+app.get('/api/ai/recommendation/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const interval = (req.query.interval || '15m').toString();
+    const key = buildKey(symbol, interval);
+
+    let candles = latestCandles.get(key);
+    if (!candles || candles.length < 50) {
+      candles = await getCandles(symbol, interval, 200);
+    }
+
+    const indicators = calculateIndicators(candles);
+    const learned = getLearnedRecommendation(indicators);
+    const standard = predictNextMove(indicators);
+
+    res.json({
+      symbol,
+      interval,
+      learned,
+      standard: {
+        signal: standard.signal,
+        confidence: standard.confidence,
+        direction: standard.direction,
+        reasons: standard.reasons
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get recommendation', message: error.message });
+  }
+});
+
+// Optimal Trading Times
+app.get('/api/ai/optimal-times', (_req, res) => {
+  try {
+    const hours = getOptimalTradingHours();
+    const days = getOptimalTradingDays();
+    const killzone = detectKillzone();
+
+    res.json({
+      hours,
+      days,
+      currentKillzone: killzone
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get optimal times', message: error.message });
+  }
+});
+
+// Combined AI Analysis (all systems)
+app.get('/api/ai/full-analysis/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const interval = (req.query.interval || '15m').toString();
+
+    const candles = await getCandles(symbol, interval, 200);
+    if (!candles || candles.length < 50) {
+      return res.status(400).json({ error: 'Insufficient data' });
+    }
+
+    const indicators = calculateIndicators(candles);
+    const standardAI = predictNextMove(indicators);
+    const mlSignal = generateMLSignal(indicators);
+    const patterns = detectChartPatterns(candles);
+    const sniper = analyzeSniperSetup(candles, indicators);
+    const learned = getLearnedRecommendation(indicators);
+    const killzone = detectKillzone();
+    const riskStatus = getRiskStatus();
+
+    // Consensus signal
+    const signals = [
+      { source: 'standard', direction: standardAI.direction, confidence: standardAI.confidence },
+      { source: 'ml', direction: mlSignal.direction, confidence: mlSignal.confidence },
+      { source: 'patterns', direction: patterns.summary?.dominantDirection, confidence: patterns.patterns[0]?.confidence / 100 || 0 },
+      { source: 'sniper', direction: sniper.bestEntry?.direction, confidence: sniper.bestEntry?.confidence / 100 || 0 },
+      { source: 'learned', direction: learned.action === 'LONG' ? 'long' : learned.action === 'SHORT' ? 'short' : 'neutral', confidence: learned.confidence }
+    ].filter(s => s.direction && s.direction !== 'neutral');
+
+    const bullishVotes = signals.filter(s => s.direction === 'bullish' || s.direction === 'long').length;
+    const bearishVotes = signals.filter(s => s.direction === 'bearish' || s.direction === 'short').length;
+    const avgConfidence = signals.length > 0 ? signals.reduce((sum, s) => sum + s.confidence, 0) / signals.length : 0;
+
+    res.json({
+      symbol,
+      interval,
+      timestamp: Date.now(),
+
+      consensus: {
+        direction: bullishVotes > bearishVotes ? 'LONG' : bearishVotes > bullishVotes ? 'SHORT' : 'HOLD',
+        bullishVotes,
+        bearishVotes,
+        avgConfidence: Math.round(avgConfidence * 100),
+        agreement: Math.abs(bullishVotes - bearishVotes) >= 3 ? 'STRONG' : Math.abs(bullishVotes - bearishVotes) >= 2 ? 'MODERATE' : 'WEAK'
+      },
+
+      analysis: {
+        standard: {
+          signal: standardAI.signal,
+          confidence: standardAI.confidence,
+          reasons: standardAI.reasons?.slice(0, 3)
+        },
+        ml: {
+          signal: mlSignal.signal,
+          confidence: mlSignal.confidence,
+          topFeatures: mlSignal.topFeatures?.slice(0, 3)
+        },
+        patterns: {
+          detected: patterns.patterns.length,
+          best: patterns.summary?.bestPattern,
+          direction: patterns.summary?.dominantDirection
+        },
+        sniper: {
+          hasSetup: sniper.hasSetup,
+          entries: sniper.entries?.length || 0,
+          best: sniper.bestEntry ? {
+            type: sniper.bestEntry.type,
+            confidence: sniper.bestEntry.confidence,
+            entry: sniper.bestEntry.entryZone
+          } : null
+        },
+        learned: {
+          action: learned.action,
+          confidence: learned.confidence,
+          regime: learned.regime
+        }
+      },
+
+      timing: {
+        killzone,
+        isOptimalTime: killzone.isOptimalTime
+      },
+
+      risk: {
+        tradingAllowed: riskStatus.tradingAllowed,
+        riskLevel: riskStatus.riskLevel,
+        currentDrawdown: riskStatus.currentState?.currentDrawdown
+      },
+
+      tradeLevels: standardAI.trade ? {
+        entry: standardAI.trade.entry,
+        stopLoss: standardAI.trade.stopLoss,
+        takeProfit: standardAI.trade.takeProfit,
+        riskPercent: standardAI.trade.riskPercent
+      } : null
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Full analysis failed', message: error.message });
+  }
+});
+
+// ============ END AI TRADING SYSTEM ENDPOINTS ============
 
 server.listen(PORT, () => {
   console.log(`Backend listening on http://localhost:${PORT}`);

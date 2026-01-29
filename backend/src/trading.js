@@ -1,6 +1,9 @@
 const axios = require('axios');
 const crypto = require('crypto');
 const { recordPattern, getStats: getPatternStats } = require('./patternMemory');
+const { learnFromTrade } = require('./aiLearning');
+const { recordTrade: recordRiskTrade, checkTradingAllowed, calculatePositionSize: riskCalcPositionSize } = require('./riskManager');
+const { addTrainingSample } = require('./mlSignalGenerator');
 
 const API_BASE = process.env.BINANCE_API_URL || 'https://fapi.binance.com';
 const API_KEY = process.env.BINANCE_API_KEY || '';
@@ -502,6 +505,55 @@ async function closePosition(symbol, reason = 'manual', currentPrice = null) {
       } catch (e) {
         // Pattern memory might not be loaded
       }
+    }
+
+    // Calculate PnL for learning
+    let pnlPercent = 0;
+    if (currentPrice && position.entryPrice) {
+      pnlPercent = position.side === 'LONG'
+        ? ((currentPrice - position.entryPrice) / position.entryPrice) * 100
+        : ((position.entryPrice - currentPrice) / position.entryPrice) * 100;
+    }
+
+    // Record trade for AI learning
+    try {
+      learnFromTrade({
+        indicators: position.signal?.indicators,
+        signal: position.signal?.signal,
+        direction: position.side?.toLowerCase(),
+        pnlPercent,
+        result,
+        symbol,
+        timestamp: Date.now()
+      });
+    } catch (e) {
+      // AI learning might not be loaded
+    }
+
+    // Record for risk management
+    try {
+      recordRiskTrade({
+        pnl: pnlPercent * (position.quantity * position.entryPrice) / 100,
+        pnlPercent,
+        result,
+        symbol,
+        direction: position.side?.toLowerCase()
+      });
+    } catch (e) {
+      // Risk manager might not be loaded
+    }
+
+    // Add to ML training data
+    try {
+      if (position.signal?.indicators) {
+        addTrainingSample(
+          position.signal.indicators,
+          position.side?.toLowerCase(),
+          result === 'win' ? 1 : result === 'loss' ? -1 : 0
+        );
+      }
+    } catch (e) {
+      // ML module might not be loaded
     }
 
     // Remove from tracking
