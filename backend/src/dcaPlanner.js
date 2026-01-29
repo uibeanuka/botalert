@@ -1,18 +1,18 @@
-const { getSpotCandles } = require('./binance');
+const { getSpotCandles, getCandles } = require('./binance');
 const { calculateIndicators } = require('./indicators');
 const { predictNextMove } = require('./ai');
 
 const DEFAULT_DCA_SYMBOLS = [
-  { symbol: 'ASTERUSDC', category: 'spot' },
-  { symbol: 'GIGGLEUSDC', category: 'spot' },
-  { symbol: 'ORDIUSDC', category: 'spot' },
-  { symbol: 'FARTCOINUSDC', category: 'alpha' },
-  { symbol: 'TRADOORUSDC', category: 'alpha' },
-  { symbol: '1000BONKUSDC', category: 'alpha' }
+  { symbol: 'ASTERUSDT', category: 'spot' },
+  { symbol: 'GIGGLEUSDT', category: 'spot' },
+  { symbol: 'ORDIUSDT', category: 'spot' },
+  { symbol: 'FARTCOINUSDT', category: 'alpha' },
+  { symbol: 'TRADOORUSDT', category: 'alpha' },
+  { symbol: '1000BONKUSDT', category: 'alpha' }
 ];
 
 const DEFAULT_INTERVAL = '1h';
-const DEFAULT_BUDGET = 100;
+const MIN_TRADE_AMOUNT = 12;
 
 function normalizeSymbols(rawSymbols) {
   if (!rawSymbols) return [];
@@ -83,7 +83,7 @@ function buildDcaItem(symbol, interval, candles, indicators, ai, category) {
   if (!candles || candles.length < 20 || !indicators || !ai) {
     return {
       symbol,
-      base: symbol.replace('USDC', ''),
+      base: symbol.replace(/USD[CT]$/, ''),
       category: category || 'spot',
       interval,
       action: 'NO_DATA',
@@ -103,7 +103,7 @@ function buildDcaItem(symbol, interval, candles, indicators, ai, category) {
 
   return {
     symbol,
-    base: symbol.replace('USDC', ''),
+    base: symbol.replace(/USD[CT]$/, ''),
     category: category || 'spot',
     interval,
     action,
@@ -142,18 +142,48 @@ function allocateBudget(items, budget) {
 
   const reservePct = Math.min(70, swapCount * 12 + waitCount * 6);
   const investablePct = Math.max(0, 100 - reservePct);
+  const investableAmount = (budget * investablePct) / 100;
 
-  const weights = actionable.map((item) => {
+  // Calculate weights for each actionable item
+  const weightMap = new Map();
+  for (const item of actionable) {
     if (item.action === 'ACCUMULATE') {
       let w = 1.1 + (item.confidence ?? 0.5);
       if (item.isSniper && item.sniperDirection === 'bullish') w += 0.4;
-      return w;
+      weightMap.set(item.symbol, w);
+    } else if (item.action === 'WAIT') {
+      weightMap.set(item.symbol, 0.4 + (item.confidence ?? 0.5) * 0.3);
+    } else {
+      weightMap.set(item.symbol, 0);
     }
-    if (item.action === 'WAIT') return 0.4 + (item.confidence ?? 0.5) * 0.3;
-    return 0;
-  });
+  }
 
-  const totalWeight = weights.reduce((sum, w) => sum + w, 0) || 1;
+  // Iteratively remove items that would get less than $12 until all remaining get $12+
+  const eligibleSymbols = new Set(actionable.map((i) => i.symbol));
+  let iterations = 0;
+  while (iterations < 10) {
+    iterations++;
+    const eligibleItems = actionable.filter((i) => eligibleSymbols.has(i.symbol) && weightMap.get(i.symbol) > 0);
+    const totalWeight = eligibleItems.reduce((sum, i) => sum + weightMap.get(i.symbol), 0) || 1;
+
+    let removedAny = false;
+    for (const item of eligibleItems) {
+      const weight = weightMap.get(item.symbol);
+      const weeklyAmount = (investableAmount * weight) / totalWeight;
+      const dailyAmount = weeklyAmount / 7;
+      const tradeAmount = item.cadence === 'daily' ? dailyAmount : weeklyAmount;
+
+      if (tradeAmount < MIN_TRADE_AMOUNT) {
+        eligibleSymbols.delete(item.symbol);
+        removedAny = true;
+      }
+    }
+    if (!removedAny) break;
+  }
+
+  // Final allocation only to eligible items
+  const finalEligible = actionable.filter((i) => eligibleSymbols.has(i.symbol) && weightMap.get(i.symbol) > 0);
+  const finalTotalWeight = finalEligible.reduce((sum, i) => sum + weightMap.get(i.symbol), 0) || 1;
 
   const enriched = items.map((item) => {
     if (item.action === 'NO_DATA' || item.action === 'SWAP_TO_USDC') {
@@ -165,9 +195,18 @@ function allocateBudget(items, budget) {
       };
     }
 
-    const index = actionable.indexOf(item);
-    const weight = index >= 0 ? weights[index] : 0;
-    const allocationPct = weight > 0 ? (investablePct * weight) / totalWeight : 0;
+    const isEligible = eligibleSymbols.has(item.symbol) && weightMap.get(item.symbol) > 0;
+    if (!isEligible) {
+      return {
+        ...item,
+        allocationPct: 0,
+        weeklyAmount: 0,
+        dailyAmount: 0
+      };
+    }
+
+    const weight = weightMap.get(item.symbol);
+    const allocationPct = (investablePct * weight) / finalTotalWeight;
     const weeklyAmount = (budget * allocationPct) / 100;
     const dailyAmount = weeklyAmount / 7;
 
@@ -194,11 +233,12 @@ function allocateBudget(items, budget) {
   };
 }
 
-async function buildDcaPlan({ symbols, interval, budget, latestCandles }) {
+async function buildDcaPlan({ symbols, interval, usdcBalance, latestCandles }) {
   const resolvedSymbols = normalizeSymbols(symbols);
   const targetSymbols = resolvedSymbols.length ? resolvedSymbols : DEFAULT_DCA_SYMBOLS;
   const resolvedInterval = interval || DEFAULT_INTERVAL;
-  const resolvedBudget = Number.isFinite(budget) ? budget : DEFAULT_BUDGET;
+  // Use actual USDC balance for allocation (fallback to 0 if not provided)
+  const availableBalance = Number.isFinite(usdcBalance) ? usdcBalance : 0;
 
   const items = [];
   for (const entry of targetSymbols) {
@@ -208,9 +248,19 @@ async function buildDcaPlan({ symbols, interval, budget, latestCandles }) {
     let candles = latestCandles?.get(key);
     if (!candles || candles.length < 20) {
       try {
-        candles = await getSpotCandles(sym, resolvedInterval);
+        // Alpha coins live on futures; spot coins on spot market
+        candles = category === 'alpha'
+          ? await getCandles(sym, resolvedInterval)
+          : await getSpotCandles(sym, resolvedInterval);
       } catch (err) {
-        candles = null;
+        // Fallback: try the other API
+        try {
+          candles = category === 'alpha'
+            ? await getSpotCandles(sym, resolvedInterval)
+            : await getCandles(sym, resolvedInterval);
+        } catch {
+          candles = null;
+        }
       }
     }
 
@@ -219,11 +269,11 @@ async function buildDcaPlan({ symbols, interval, budget, latestCandles }) {
     items.push(buildDcaItem(sym, resolvedInterval, candles, indicators, ai, category));
   }
 
-  const allocation = allocateBudget(items, resolvedBudget);
+  const allocation = allocateBudget(items, availableBalance);
 
   return {
     interval: resolvedInterval,
-    budget: roundMoney(resolvedBudget, 2),
+    usdcBalance: roundMoney(availableBalance, 2),
     updatedAt: Date.now(),
     items: allocation.items,
     reserve: allocation.reserve

@@ -11,7 +11,7 @@ const { buildDcaPlan, DEFAULT_DCA_SYMBOLS } = require('./dcaPlanner');
 const { executeTrade, closePosition, monitorAllPositions, getStatus: getTradingStatus, updateSettings, TRADING_ENABLED, MIN_CONFIDENCE } = require('./trading');
 const { handleChatMessage } = require('./chatHandler');
 const { getStats: getPatternStats, recordMissedOpportunity } = require('./patternMemory');
-const { startSpotDcaEngine, getSpotDcaStatus } = require('./spotDcaEngine');
+const { startSpotDcaEngine, getSpotDcaStatus, getSpotBalances, getFreeBalance } = require('./spotDcaEngine');
 
 // AI Trading System modules
 const { detectChartPatterns } = require('./chartPatterns');
@@ -176,14 +176,23 @@ app.get('/api/dca-plan', async (req, res) => {
     : DEFAULT_DCA_SYMBOLS;
   const intervalRaw = (req.query.interval || '1h').toString();
   const interval = VALID_INTERVALS.has(intervalRaw) ? intervalRaw : '1h';
-  const budgetRaw = Number(req.query.budget || 100);
-  const budget = Number.isFinite(budgetRaw) && budgetRaw > 0 ? budgetRaw : 100;
 
   try {
+    // Fetch actual USDC balance from exchange
+    let usdcBalance = 0;
+    try {
+      const balances = await getSpotBalances();
+      if (balances) {
+        usdcBalance = getFreeBalance(balances, 'USDC');
+      }
+    } catch (balanceErr) {
+      console.error('[DCA] Failed to fetch USDC balance:', balanceErr.message);
+    }
+
     const plan = await buildDcaPlan({
       symbols,
       interval,
-      budget,
+      usdcBalance,
       latestCandles
     });
     const spotStatus = getSpotDcaStatus();

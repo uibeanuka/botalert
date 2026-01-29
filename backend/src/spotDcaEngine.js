@@ -16,8 +16,8 @@ const SPOT_DCA_DRY_RUN = process.env.SPOT_DCA_DRY_RUN !== 'false';
 const SPOT_DCA_INTERVAL_MS = Number(process.env.SPOT_DCA_INTERVAL_MS || 300_000);
 const SPOT_DCA_INTERVAL = process.env.SPOT_DCA_INTERVAL || '1h';
 const SPOT_DCA_BUDGET = Number(process.env.SPOT_DCA_BUDGET || 100);
-const SPOT_DCA_MIN_USDC = Number(process.env.SPOT_DCA_MIN_USDC || 10);
-const SPOT_DCA_MIN_TRADE = Number(process.env.SPOT_DCA_MIN_TRADE || 10);
+const SPOT_DCA_MIN_USDC = Number(process.env.SPOT_DCA_MIN_USDC || 12);
+const SPOT_DCA_MIN_TRADE = Number(process.env.SPOT_DCA_MIN_TRADE || 12);
 const SPOT_DCA_SYMBOLS = (process.env.SPOT_DCA_SYMBOLS || '')
   .split(',')
   .map((s) => s.trim())
@@ -227,7 +227,7 @@ async function monitorSpotHoldings({ latestCandles }) {
   }
 
   for (const symbol of symbols) {
-    const baseAsset = symbol.replace('USDC', '');
+    const baseAsset = symbol.replace(/USD[CT]$/, '');
     const free = getFreeBalance(balances, baseAsset);
     if (free <= 0) continue;
 
@@ -490,5 +490,7 @@ function getSpotDcaStatus() {
 
 module.exports = {
   startSpotDcaEngine,
-  getSpotDcaStatus
+  getSpotDcaStatus,
+  getSpotBalances,
+  getFreeBalance
 };

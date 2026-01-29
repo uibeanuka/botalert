@@ -1318,6 +1318,12 @@ a:hover {
   color: var(--accent-blue);
 }
 
+.dca-below-min {
+  font-size: 0.75rem;
+  color: var(--accent-orange);
+  margin-top: var(--space-xs);
+}
+
 .dca-reserve {
   display: flex;
   flex-direction: column;

@@ -5,19 +5,18 @@ import ChatWidget from '../components/ChatWidget';
 import { fetchDcaPlan } from '../lib/api';
 
 const TARGET_SYMBOLS = [
-  { symbol: 'ASTERUSDC', category: 'spot' },
-  { symbol: 'GIGGLEUSDC', category: 'spot' },
-  { symbol: 'ORDIUSDC', category: 'spot' },
-  { symbol: 'FARTCOINUSDC', category: 'alpha' },
-  { symbol: 'TRADOORUSDC', category: 'alpha' },
-  { symbol: '1000BONKUSDC', category: 'alpha' }
+  { symbol: 'ASTERUSDT', category: 'spot' },
+  { symbol: 'GIGGLEUSDT', category: 'spot' },
+  { symbol: 'ORDIUSDT', category: 'spot' },
+  { symbol: 'FARTCOINUSDT', category: 'alpha' },
+  { symbol: 'TRADOORUSDT', category: 'alpha' },
+  { symbol: '1000BONKUSDT', category: 'alpha' }
 ];
 
 const INTERVAL_OPTIONS = ['1h', '4h', '1d'];
 
 export default function DcaPage() {
   const [plan, setPlan] = useState(null);
-  const [budget, setBudget] = useState(100);
   const [interval, setDcaInterval] = useState('1h');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
@@ -26,17 +25,14 @@ export default function DcaPage() {
     setIsLoading(true);
     setError('');
     try {
-      const data = await fetchDcaPlan({
-        interval,
-        budget
-      });
+      const data = await fetchDcaPlan({ interval });
       setPlan(data);
     } catch (err) {
       setError('Failed to load DCA plan.');
     } finally {
       setIsLoading(false);
     }
-  }, [interval, budget]);
+  }, [interval]);
 
   useEffect(() => {
     loadPlan();
@@ -48,12 +44,6 @@ export default function DcaPage() {
     if (!plan?.updatedAt) return '—';
     return new Date(plan.updatedAt).toLocaleTimeString();
   }, [plan]);
-
-  const dailyBudget = useMemo(() => {
-    const weekly = Number(budget);
-    if (!Number.isFinite(weekly)) return 0;
-    return weekly / 7;
-  }, [budget]);
 
   return (
     <div className="page with-bottom-nav">
@@ -97,23 +87,16 @@ export default function DcaPage() {
         <div className="main-content">
           <div className="card dca-controls">
             <div className="card-header">
-              <span className="card-title">DCA Budget</span>
+              <span className="card-title">DCA Status</span>
               <span className={`tag ${isLoading ? 'tag-neutral' : 'tag-long'}`}>
                 {isLoading ? 'Updating' : 'Live Plan'}
               </span>
             </div>
             <div className="dca-controls-grid">
               <div className="dca-control">
-                <span className="dca-control-label">Weekly USDC budget</span>
-                <input
-                  className="input"
-                  type="number"
-                  min="10"
-                  step="1"
-                  value={budget}
-                  onChange={(e) => setBudget(Number(e.target.value || 0))}
-                />
-                <span className="dca-control-meta">Daily: ${formatMoney(dailyBudget)}</span>
+                <span className="dca-control-label">Available USDC</span>
+                <div className="dca-control-value">${formatMoney(plan?.usdcBalance)}</div>
+                <span className="dca-control-meta">Min trade: $12</span>
               </div>
               <div className="dca-control">
                 <span className="dca-control-label">Last update</span>
@@ -123,7 +106,7 @@ export default function DcaPage() {
               <div className="dca-control">
                 <span className="dca-control-label">Strategy</span>
                 <div className="dca-control-value">Trend + candle flow</div>
-                <span className="dca-control-meta">Spot + Alpha • USDC reserve active</span>
+                <span className="dca-control-meta">Spot + Alpha • Auto DCA</span>
               </div>
             </div>
             {error && <div className="dca-error">{error}</div>}
@@ -242,7 +225,7 @@ function DcaCoinCard({ item }) {
       <div className="dca-card-header">
         <div className="dca-coin">
           <span className="dca-symbol">{item.base}</span>
-          <span className="dca-pair">/USDC</span>
+          <span className="dca-pair">/USDT</span>
         </div>
         <span className={`tag ${tagClass}`}>{actionLabel}</span>
       </div>
