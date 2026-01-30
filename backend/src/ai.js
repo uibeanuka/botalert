@@ -2,6 +2,33 @@ const { findSimilarPatterns } = require('./patternMemory');
 const { getMarketCycleAnalysis, checkCycleAlignment } = require('./marketCycle');
 const { checkSniperConfirmation } = require('./sniperConfirmation');
 
+// Funding rate cache (populated by server/scanner)
+let fundingRatesCache = {};
+
+function setFundingRates(rates) {
+  fundingRatesCache = rates || {};
+}
+
+function getFundingSignal(symbol) {
+  const funding = fundingRatesCache[symbol];
+  if (!funding) return null;
+
+  const rate = funding.fundingRate;
+  if (rate >= 0.001) {
+    return { direction: 'bearish', strength: 'extreme', rate, reason: 'Extreme positive funding - fade longs' };
+  }
+  if (rate >= 0.0005) {
+    return { direction: 'bearish', strength: 'high', rate, reason: 'High positive funding - caution longs' };
+  }
+  if (rate <= -0.001) {
+    return { direction: 'bullish', strength: 'extreme', rate, reason: 'Extreme negative funding - fade shorts' };
+  }
+  if (rate <= -0.0005) {
+    return { direction: 'bullish', strength: 'high', rate, reason: 'High negative funding - caution shorts' };
+  }
+  return null;
+}
+
 function predictNextMove(indicators, multiTimeframeData = null, symbol = 'UNKNOWN') {
   if (!indicators) {
     return { direction: 'neutral', confidence: 0.5, explanation: 'No indicators available', signal: 'HOLD' };
@@ -354,6 +381,31 @@ function predictNextMove(indicators, multiTimeframeData = null, symbol = 'UNKNOW
     // Market cycle module not available
   }
 
+  // === FUNDING RATE ANALYSIS (Contrarian signal) ===
+  let fundingBonus = 0;
+  let fundingSignal = null;
+  try {
+    fundingSignal = getFundingSignal(symbol);
+    if (fundingSignal) {
+      // Extreme funding is a strong contrarian signal
+      const fundingScore = fundingSignal.strength === 'extreme' ? 15 : 8;
+
+      if (fundingSignal.direction === 'bullish') {
+        // Negative funding = shorts overleveraged = bullish
+        bullScore += fundingScore;
+        fundingBonus = fundingScore;
+        reasons.push(`FUNDING: ${fundingSignal.reason} (+${fundingScore} bull)`);
+      } else if (fundingSignal.direction === 'bearish') {
+        // Positive funding = longs overleveraged = bearish
+        bearScore += fundingScore;
+        fundingBonus = fundingScore;
+        reasons.push(`FUNDING: ${fundingSignal.reason} (+${fundingScore} bear)`);
+      }
+    }
+  } catch (e) {
+    // Funding data not available
+  }
+
   // Calculate final scores and direction
   const totalScore = bullScore + bearScore;
   const maxPossibleScore = 185; // Updated for sniper + volume surge signals
@@ -651,5 +703,6 @@ function filterHighProbability(prediction) {
 module.exports = {
   predictNextMove,
   filterHighProbability,
-  buildTradeRecommendation
+  buildTradeRecommendation,
+  setFundingRates
 };

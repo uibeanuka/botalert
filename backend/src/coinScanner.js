@@ -8,6 +8,27 @@
 const { getFuturesSymbols, getCandles } = require('./binance');
 const { calculateIndicators } = require('./indicators');
 const { predictNextMove } = require('./ai');
+const { fetchFundingRates } = require('./fundingRates');
+
+// Funding rate cache
+let fundingCache = {};
+let fundingCacheTime = 0;
+const FUNDING_CACHE_MS = 5 * 60 * 1000; // 5 min cache
+
+async function getFundingData() {
+  const now = Date.now();
+  if (Object.keys(fundingCache).length && now - fundingCacheTime < FUNDING_CACHE_MS) {
+    return fundingCache;
+  }
+  try {
+    const data = await fetchFundingRates();
+    fundingCache = data.rates || {};
+    fundingCacheTime = now;
+    return fundingCache;
+  } catch (err) {
+    return fundingCache;
+  }
+}
 
 // Scanner config
 const SCAN_BATCH_SIZE = 10; // Process 10 coins at a time
@@ -117,6 +138,51 @@ async function scanCoin(symbol, interval = '15m') {
       score += 20;
     }
 
+    // FUNDING RATE ANALYSIS - Extreme funding = contrarian opportunity
+    let fundingData = null;
+    let fundingSignal = null;
+    try {
+      const funding = fundingCache[symbol];
+      if (funding) {
+        const rate = funding.fundingRate;
+        fundingData = {
+          rate,
+          ratePercent: funding.fundingRatePercent,
+          signal: funding.signal
+        };
+
+        // Extreme positive funding (overleveraged longs) = SHORT opportunity
+        if (rate >= 0.001) {
+          score += 25;
+          fundingSignal = 'extreme_long';
+          reasons.push(`EXTREME FUNDING +${(rate * 100).toFixed(3)}% (fade longs)`);
+          // If AI also says short, extra boost
+          if (ai.direction === 'short') score += 15;
+        }
+        // Extreme negative funding (overleveraged shorts) = LONG opportunity
+        else if (rate <= -0.001) {
+          score += 25;
+          fundingSignal = 'extreme_short';
+          reasons.push(`EXTREME FUNDING ${(rate * 100).toFixed(3)}% (fade shorts)`);
+          // If AI also says long, extra boost
+          if (ai.direction === 'long') score += 15;
+        }
+        // High funding (not extreme but notable)
+        else if (rate >= 0.0005) {
+          score += 10;
+          fundingSignal = 'high_long';
+          reasons.push(`High funding +${(rate * 100).toFixed(3)}%`);
+        }
+        else if (rate <= -0.0005) {
+          score += 10;
+          fundingSignal = 'high_short';
+          reasons.push(`High funding ${(rate * 100).toFixed(3)}%`);
+        }
+      }
+    } catch (err) {
+      // Funding data not available
+    }
+
     return {
       symbol,
       score: Math.round(score),
@@ -130,6 +196,8 @@ async function scanCoin(symbol, interval = '15m') {
       sniperActive: sniper?.score?.isSniper || false,
       sniperDirection: sniper?.score?.direction,
       sniperScore: sniper?.score?.score || 0,
+      funding: fundingData,
+      fundingSignal,
       timestamp: Date.now()
     };
   } catch (err) {
@@ -205,7 +273,13 @@ async function runFullScan() {
     await initScanner();
   }
 
-  console.log(`[SCANNER] Starting full scan of ${allFuturesSymbols.length} coins...`);
+  // Pre-fetch funding rates for all symbols
+  await getFundingData();
+  const extremeCount = Object.values(fundingCache).filter(f =>
+    Math.abs(f.fundingRate) >= 0.001
+  ).length;
+
+  console.log(`[SCANNER] Starting full scan of ${allFuturesSymbols.length} coins (${extremeCount} with extreme funding)...`);
   scanQueue = [...allFuturesSymbols];
   lastFullScan = Date.now();
 

@@ -6,7 +6,7 @@ const { Server } = require('socket.io');
 const webpush = require('web-push');
 const { getCandles, getUsdtPerpetualMarkets, getTopGainers, getVolumeSurgers } = require('./binance');
 const { calculateIndicators } = require('./indicators');
-const { predictNextMove } = require('./ai');
+const { predictNextMove, setFundingRates } = require('./ai');
 const { buildDcaPlan, DEFAULT_DCA_SYMBOLS } = require('./dcaPlanner');
 const { executeTrade, closePosition, monitorAllPositions, getStatus: getTradingStatus, updateSettings, TRADING_ENABLED, MIN_CONFIDENCE } = require('./trading');
 const { handleChatMessage } = require('./chatHandler');
@@ -1344,6 +1344,27 @@ function schedulePolling() {
   pollers.push(surgeId);
   // First surge scan after 30 seconds
   setTimeout(() => scanVolumeSurges(), 30 * 1000);
+
+  // Funding rate updater — keeps AI informed of extreme funding for contrarian trades
+  async function updateFundingForAI() {
+    try {
+      const data = await fetchFundingRates();
+      if (data?.rates) {
+        setFundingRates(data.rates);
+        const extremes = data.extremes?.length || 0;
+        if (extremes > 0) {
+          console.log(`[FUNDING] Updated ${Object.keys(data.rates).length} rates, ${extremes} extreme`);
+        }
+      }
+    } catch (err) {
+      // Silent fail
+    }
+  }
+  // Update funding every 5 minutes
+  const fundingId = setInterval(updateFundingForAI, 5 * 60 * 1000);
+  pollers.push(fundingId);
+  // First update after 10 seconds
+  setTimeout(updateFundingForAI, 10 * 1000);
 
   // Monitor open positions every 30 seconds for smart exits
   if (TRADING_ENABLED) {
