@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { buildDcaPlan, DEFAULT_DCA_SYMBOLS } = require('./dcaPlanner');
-const { getSpotExchangeInfo, getSpotCandles } = require('./binance');
+const { getSpotExchangeInfo, getSpotCandles, getTopGainers } = require('./binance');
 const { calculateIndicators } = require('./indicators');
 const { predictNextMove } = require('./ai');
 
@@ -11,8 +11,16 @@ const API_BASE = process.env.BINANCE_SPOT_API_URL || 'https://api.binance.com';
 const API_KEY = process.env.BINANCE_API_KEY || '';
 const API_SECRET = process.env.BINANCE_API_SECRET || '';
 
-const SPOT_DCA_ENABLED = process.env.SPOT_DCA_ENABLED === 'true';
-const SPOT_DCA_DRY_RUN = process.env.SPOT_DCA_DRY_RUN !== 'false';
+// Auto-enable when API keys are present (can override with explicit env var)
+const HAS_API_KEYS = !!(API_KEY && API_SECRET);
+const SPOT_DCA_ENABLED = process.env.SPOT_DCA_ENABLED !== undefined
+  ? process.env.SPOT_DCA_ENABLED === 'true'
+  : HAS_API_KEYS; // Auto-enable if keys exist
+
+// Auto-disable dry-run when API keys are present (can override with explicit env var)
+const SPOT_DCA_DRY_RUN = process.env.SPOT_DCA_DRY_RUN !== undefined
+  ? process.env.SPOT_DCA_DRY_RUN === 'true'
+  : !HAS_API_KEYS; // Dry-run only if no keys
 const SPOT_DCA_INTERVAL_MS = Number(process.env.SPOT_DCA_INTERVAL_MS || 300_000);
 const SPOT_DCA_INTERVAL = process.env.SPOT_DCA_INTERVAL || '1h';
 const SPOT_DCA_BUDGET = Number(process.env.SPOT_DCA_BUDGET || 100);
@@ -203,6 +211,87 @@ function calculateSpotSpend(item, sniperResult, availableUsdc) {
   return spend;
 }
 
+// --- DYNAMIC COIN DISCOVERY ---
+// Discover trending coins that are pumping (like 42USDT, BULLAUSDT, etc.)
+let discoveredCoinsCache = [];
+let discoveredCoinsFetchedAt = 0;
+const DISCOVERY_CACHE_MS = 10 * 60 * 1000; // 10 min cache
+
+async function discoverTrendingCoins() {
+  const now = Date.now();
+  if (discoveredCoinsCache.length && now - discoveredCoinsFetchedAt < DISCOVERY_CACHE_MS) {
+    return discoveredCoinsCache;
+  }
+
+  try {
+    // Get top gainers with at least 8% gain and $500k volume
+    const gainers = await getTopGainers(8, 15);
+
+    // Filter for spot-tradeable coins (exclude leveraged tokens, etc.)
+    const trending = gainers
+      .filter(g => {
+        const sym = g.symbol;
+        // Exclude leveraged tokens, stablecoins, etc.
+        if (sym.includes('UP') || sym.includes('DOWN') || sym.includes('BEAR') || sym.includes('BULL')) {
+          // But allow coins like BULLAUSDT (the token, not leveraged)
+          if (!sym.startsWith('BULLA') && !sym.startsWith('BULL')) return false;
+        }
+        if (sym.endsWith('BUSD') || sym.endsWith('TUSD') || sym.endsWith('FDUSD')) return false;
+        return sym.endsWith('USDT') || sym.endsWith('USDC');
+      })
+      .map(g => ({
+        symbol: g.symbol,
+        category: 'trending',
+        priceChange: g.priceChangePercent,
+        volume: g.volume
+      }));
+
+    discoveredCoinsCache = trending;
+    discoveredCoinsFetchedAt = now;
+
+    if (trending.length > 0) {
+      console.log(`[SPOT DCA] Discovered ${trending.length} trending coins: ${trending.map(t => `${t.symbol}(+${t.priceChange.toFixed(1)}%)`).join(', ')}`);
+    }
+
+    return trending;
+  } catch (err) {
+    console.warn('[SPOT DCA] Failed to discover trending coins:', err.message);
+    return discoveredCoinsCache;
+  }
+}
+
+function mergeSymbolLists(defaultSymbols, trendingCoins, envSymbols) {
+  const seen = new Set();
+  const merged = [];
+
+  // Add env symbols first (highest priority)
+  for (const sym of envSymbols) {
+    if (!seen.has(sym)) {
+      seen.add(sym);
+      merged.push({ symbol: sym, category: 'configured' });
+    }
+  }
+
+  // Add default symbols
+  for (const entry of defaultSymbols) {
+    const sym = typeof entry === 'object' ? entry.symbol : entry;
+    if (!seen.has(sym)) {
+      seen.add(sym);
+      merged.push(typeof entry === 'object' ? entry : { symbol: sym, category: 'spot' });
+    }
+  }
+
+  // Add trending coins (discovered dynamically)
+  for (const coin of trendingCoins) {
+    if (!seen.has(coin.symbol)) {
+      seen.add(coin.symbol);
+      merged.push(coin);
+    }
+  }
+
+  return merged;
+}
+
 // --- SMART EXIT MONITORING ---
 
 async function monitorSpotHoldings({ latestCandles }) {
@@ -217,7 +306,8 @@ async function monitorSpotHoldings({ latestCandles }) {
   }
   if (!balances) return;
 
-  const symbols = SPOT_DCA_SYMBOLS.length ? SPOT_DCA_SYMBOLS : DEFAULT_DCA_SYMBOLS;
+  // Use cached trending coins (don't re-fetch during monitoring)
+  const symbols = mergeSymbolLists(DEFAULT_DCA_SYMBOLS, discoveredCoinsCache, SPOT_DCA_SYMBOLS);
   const state = loadState();
   let info;
   try {
@@ -226,7 +316,8 @@ async function monitorSpotHoldings({ latestCandles }) {
     return;
   }
 
-  for (const symbol of symbols) {
+  for (const entry of symbols) {
+    const symbol = typeof entry === 'object' ? entry.symbol : entry;
     const baseAsset = symbol.replace(/USD[CT]$/, '');
     const free = getFreeBalance(balances, baseAsset);
     if (free <= 0) continue;
@@ -329,7 +420,12 @@ async function monitorSpotHoldings({ latestCandles }) {
 async function runSpotDca({ latestCandles }) {
   if (!SPOT_DCA_ENABLED) return;
 
-  const symbols = SPOT_DCA_SYMBOLS.length ? SPOT_DCA_SYMBOLS : DEFAULT_DCA_SYMBOLS;
+  // Discover trending coins dynamically
+  const trendingCoins = await discoverTrendingCoins();
+
+  // Merge: env symbols > default symbols > trending coins
+  const symbols = mergeSymbolLists(DEFAULT_DCA_SYMBOLS, trendingCoins, SPOT_DCA_SYMBOLS);
+
   const plan = await buildDcaPlan({
     symbols,
     interval: SPOT_DCA_INTERVAL,
@@ -450,11 +546,18 @@ async function runSpotDca({ latestCandles }) {
 
 function startSpotDcaEngine({ latestCandles, latestSignals }) {
   if (!SPOT_DCA_ENABLED) {
-    console.log('[SPOT DCA] Disabled. Set SPOT_DCA_ENABLED=true to activate.');
+    if (!HAS_API_KEYS) {
+      console.log('[SPOT DCA] Disabled (no API keys). Add BINANCE_API_KEY and BINANCE_API_SECRET to enable.');
+    } else {
+      console.log('[SPOT DCA] Disabled. Set SPOT_DCA_ENABLED=true to activate.');
+    }
     return null;
   }
 
-  console.log(`[SPOT DCA] Started (${SPOT_DCA_DRY_RUN ? 'dry-run' : 'live'}, sniper: ${SPOT_DCA_SNIPER_ENABLED ? 'on' : 'off'}, smart-exit: ${SPOT_DCA_SMART_EXIT_ENABLED ? 'on' : 'off'})`);
+  const mode = SPOT_DCA_DRY_RUN ? 'DRY-RUN' : 'LIVE';
+  console.log(`[SPOT DCA] Started in ${mode} mode`);
+  console.log(`[SPOT DCA] Config: sniper=${SPOT_DCA_SNIPER_ENABLED ? 'on' : 'off'}, smart-exit=${SPOT_DCA_SMART_EXIT_ENABLED ? 'on' : 'off'}, discovery=on`);
+  console.log(`[SPOT DCA] Budget: $${SPOT_DCA_BUDGET}/week, min trade: $${SPOT_DCA_MIN_TRADE}`);
 
   // Main DCA loop (every 5min default)
   const dcaTimer = setInterval(() => {

@@ -3,12 +3,24 @@ const { calculateIndicators } = require('./indicators');
 const { predictNextMove } = require('./ai');
 
 const DEFAULT_DCA_SYMBOLS = [
+  // Spot coins
   { symbol: 'ASTERUSDT', category: 'spot' },
   { symbol: 'GIGGLEUSDT', category: 'spot' },
   { symbol: 'ORDIUSDT', category: 'spot' },
+  // Alpha/Meme coins
   { symbol: 'FARTCOINUSDT', category: 'alpha' },
   { symbol: 'TRADOORUSDT', category: 'alpha' },
-  { symbol: '1000BONKUSDT', category: 'alpha' }
+  { symbol: '1000BONKUSDT', category: 'alpha' },
+  // User-requested coins
+  { symbol: '42USDT', category: 'spot' },
+  { symbol: 'BULLAUSDT', category: 'spot' },
+  { symbol: 'SENTUSDT', category: 'spot' },
+  { symbol: 'BLUAUSDT', category: 'spot' },
+  // Popular trending coins
+  { symbol: 'PEPEUSDT', category: 'alpha' },
+  { symbol: 'FLOKIUSDT', category: 'alpha' },
+  { symbol: 'WIFUSDT', category: 'alpha' },
+  { symbol: 'SHIBUSDT', category: 'alpha' },
 ];
 
 const DEFAULT_INTERVAL = '1h';
