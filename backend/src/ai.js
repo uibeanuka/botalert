@@ -1,4 +1,5 @@
 const { findSimilarPatterns } = require('./patternMemory');
+const { getMarketCycleAnalysis, checkCycleAlignment } = require('./marketCycle');
 
 function predictNextMove(indicators, multiTimeframeData = null) {
   if (!indicators) {
@@ -327,6 +328,31 @@ function predictNextMove(indicators, multiTimeframeData = null) {
     }
   }
 
+  // === MARKET CYCLE ANALYSIS (Halving cycle + Seasonality) ===
+  let cycleBonus = 0;
+  let marketCycle = null;
+  try {
+    marketCycle = getMarketCycleAnalysis();
+    const { aiAdjustments, cyclePhase, seasonality } = marketCycle;
+
+    // Apply cycle-based score adjustments
+    // This biases the bot towards longs in bull phases, shorts in bear phases
+    if (aiAdjustments.longScoreBonus !== 0) {
+      bullScore += aiAdjustments.longScoreBonus;
+      bearScore += aiAdjustments.shortScoreBonus;
+
+      if (aiAdjustments.longScoreBonus > 5) {
+        reasons.push(`CYCLE: ${cyclePhase.phase} + ${seasonality.monthName} favor LONGS (+${aiAdjustments.longScoreBonus})`);
+      } else if (aiAdjustments.shortScoreBonus > 5) {
+        reasons.push(`CYCLE: ${cyclePhase.phase} + ${seasonality.monthName} favor SHORTS (+${aiAdjustments.shortScoreBonus})`);
+      }
+    }
+
+    cycleBonus = aiAdjustments.confidenceBonus * 100; // Convert to points
+  } catch (e) {
+    // Market cycle module not available
+  }
+
   // Calculate final scores and direction
   const totalScore = bullScore + bearScore;
   const maxPossibleScore = 185; // Updated for sniper + volume surge signals
@@ -356,6 +382,9 @@ function predictNextMove(indicators, multiTimeframeData = null) {
     // Multi-timeframe bonus
     confidence += mtfBonus / 100;
 
+    // Market cycle bonus (halving + seasonality alignment)
+    confidence += cycleBonus / 100;
+
     // Midweek reversal caution (small penalty)
     confidence -= midweekCaution;
 
@@ -365,38 +394,59 @@ function predictNextMove(indicators, multiTimeframeData = null) {
     const MIN_DIFF_FOR_DIRECTION = 10;  // Minimum to change direction
     const NEUTRAL_ZONE_THRESHOLD = 15;  // Minimum for actionable signal
 
+    // === SNIPER CONFLICT CHECK ===
+    // If sniper has a strong signal in opposite direction, it should block the trade
+    const sniperDir = sniperSignals?.score?.direction;
+    const sniperScore = sniperSignals?.score?.score || 0;
+    const sniperIsStrong = sniperSignals?.score?.isSniper && sniperScore >= 40;
+
     // Determine direction only if score difference is significant enough
     if (scoreDiff >= MIN_DIFF_FOR_DIRECTION) {
       if (bullScore > bearScore) {
         direction = 'long';
-        // Only generate signal if outside neutral zone
-        if (scoreDiff >= NEUTRAL_ZONE_THRESHOLD && bullScore >= 40) {
-          signal = 'LONG';
-          if (bullScore >= 60 && scoreDiff >= 25) {
-            signal = 'STRONG_LONG';
-            confidence += 0.05;
+
+        // SNIPER CONFLICT: If bearish sniper is active, block the LONG
+        if (sniperIsStrong && sniperDir === 'bearish') {
+          reasons.push(`SNIPER BLOCK: Bearish sniper (${sniperScore}) opposes LONG - waiting`);
+          confidence -= 0.15; // Reduce confidence significantly
+          // Keep signal as HOLD - don't enter against sniper
+        } else {
+          // Only generate signal if outside neutral zone
+          if (scoreDiff >= NEUTRAL_ZONE_THRESHOLD && bullScore >= 40) {
+            signal = 'LONG';
+            if (bullScore >= 60 && scoreDiff >= 25) {
+              signal = 'STRONG_LONG';
+              confidence += 0.05;
+            }
           }
-        }
-        // SNIPER signal: upgrade any signal (HOLD/LONG/STRONG_LONG → SNIPER_LONG)
-        // Also allows sniper to generate entries when base scores are below threshold
-        if (sniperSignals?.score?.isSniper && sniperSignals?.score?.direction === 'bullish') {
-          signal = 'SNIPER_LONG';
-          confidence += 0.03;
+          // SNIPER signal: upgrade when sniper AGREES with direction
+          if (sniperSignals?.score?.isSniper && sniperDir === 'bullish') {
+            signal = 'SNIPER_LONG';
+            confidence += 0.03;
+          }
         }
       } else if (bearScore > bullScore) {
         direction = 'short';
-        // Only generate signal if outside neutral zone
-        if (scoreDiff >= NEUTRAL_ZONE_THRESHOLD && bearScore >= 40) {
-          signal = 'SHORT';
-          if (bearScore >= 60 && scoreDiff >= 25) {
-            signal = 'STRONG_SHORT';
-            confidence += 0.05;
+
+        // SNIPER CONFLICT: If bullish sniper is active, block the SHORT
+        if (sniperIsStrong && sniperDir === 'bullish') {
+          reasons.push(`SNIPER BLOCK: Bullish sniper (${sniperScore}) opposes SHORT - waiting`);
+          confidence -= 0.15; // Reduce confidence significantly
+          // Keep signal as HOLD - don't enter against sniper
+        } else {
+          // Only generate signal if outside neutral zone
+          if (scoreDiff >= NEUTRAL_ZONE_THRESHOLD && bearScore >= 40) {
+            signal = 'SHORT';
+            if (bearScore >= 60 && scoreDiff >= 25) {
+              signal = 'STRONG_SHORT';
+              confidence += 0.05;
+            }
           }
-        }
-        // SNIPER signal: upgrade any signal (HOLD/SHORT/STRONG_SHORT → SNIPER_SHORT)
-        if (sniperSignals?.score?.isSniper && sniperSignals?.score?.direction === 'bearish') {
-          signal = 'SNIPER_SHORT';
-          confidence += 0.03;
+          // SNIPER signal: upgrade when sniper AGREES with direction
+          if (sniperSignals?.score?.isSniper && sniperDir === 'bearish') {
+            signal = 'SNIPER_SHORT';
+            confidence += 0.03;
+          }
         }
       }
     } else {
@@ -478,6 +528,15 @@ function predictNextMove(indicators, multiTimeframeData = null) {
       matches: patternMatch.matches,
       winRate: patternMatch.winRate,
       isBestPattern: patternMatch.isBestPattern
+    } : null,
+    // Market cycle analysis (halving + seasonality)
+    marketCycle: marketCycle ? {
+      phase: marketCycle.cyclePhase?.phase,
+      monthsSinceHalving: marketCycle.cyclePhase?.monthsSinceHalving,
+      month: marketCycle.seasonality?.monthName,
+      overallBias: marketCycle.overallBias,
+      recommendation: marketCycle.recommendation,
+      longBias: marketCycle.longBias
     } : null
   };
 }
