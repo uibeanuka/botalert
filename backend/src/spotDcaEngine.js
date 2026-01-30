@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { buildDcaPlan, DEFAULT_DCA_SYMBOLS } = require('./dcaPlanner');
-const { getSpotExchangeInfo, getSpotCandles, getTopGainers } = require('./binance');
+const { getSpotExchangeInfo, getSpotCandles, getTopGainers, getVolumeSurgers, getTopMovers } = require('./binance');
 const { calculateIndicators } = require('./indicators');
 const { predictNextMove } = require('./ai');
 
@@ -212,10 +212,19 @@ function calculateSpotSpend(item, sniperResult, availableUsdc) {
 }
 
 // --- DYNAMIC COIN DISCOVERY ---
-// Discover trending coins that are pumping (like 42USDT, BULLAUSDT, etc.)
+// Comprehensive discovery of trending, pumping, and accumulating coins
 let discoveredCoinsCache = [];
 let discoveredCoinsFetchedAt = 0;
-const DISCOVERY_CACHE_MS = 10 * 60 * 1000; // 10 min cache
+const DISCOVERY_CACHE_MS = 5 * 60 * 1000; // 5 min cache (faster refresh)
+
+function isValidCoin(sym) {
+  // Exclude leveraged tokens, stablecoins, etc.
+  if (sym.includes('UPUSDT') || sym.includes('DOWNUSDT')) return false;
+  if (sym.includes('BEARUSDT') || sym.includes('BULLUSDT')) return false;
+  if (sym.endsWith('BUSD') || sym.endsWith('TUSD') || sym.endsWith('FDUSD')) return false;
+  // Must be USDT or USDC pair
+  return sym.endsWith('USDT') || sym.endsWith('USDC');
+}
 
 async function discoverTrendingCoins() {
   const now = Date.now();
@@ -223,39 +232,80 @@ async function discoverTrendingCoins() {
     return discoveredCoinsCache;
   }
 
-  try {
-    // Get top gainers with at least 8% gain and $500k volume
-    const gainers = await getTopGainers(8, 15);
+  const discovered = new Map(); // symbol -> coin data
 
-    // Filter for spot-tradeable coins (exclude leveraged tokens, etc.)
-    const trending = gainers
-      .filter(g => {
-        const sym = g.symbol;
-        // Exclude leveraged tokens, stablecoins, etc.
-        if (sym.includes('UP') || sym.includes('DOWN') || sym.includes('BEAR') || sym.includes('BULL')) {
-          // But allow coins like BULLAUSDT (the token, not leveraged)
-          if (!sym.startsWith('BULLA') && !sym.startsWith('BULL')) return false;
-        }
-        if (sym.endsWith('BUSD') || sym.endsWith('TUSD') || sym.endsWith('FDUSD')) return false;
-        return sym.endsWith('USDT') || sym.endsWith('USDC');
-      })
-      .map(g => ({
+  try {
+    // 1. TOP GAINERS - coins already pumping (3%+ gain, lower threshold to catch more)
+    const gainers = await getTopGainers(3, 50);
+    for (const g of gainers) {
+      if (!isValidCoin(g.symbol)) continue;
+      discovered.set(g.symbol, {
         symbol: g.symbol,
-        category: 'trending',
+        category: 'gainer',
         priceChange: g.priceChangePercent,
-        volume: g.volume
-      }));
+        volume: g.volume,
+        priority: g.priceChangePercent >= 10 ? 'high' : 'medium'
+      });
+    }
+
+    // 2. VOLUME SURGERS - accumulating before big move
+    const surgers = await getVolumeSurgers(40);
+    for (const s of surgers) {
+      if (!isValidCoin(s.symbol)) continue;
+      if (!discovered.has(s.symbol)) {
+        discovered.set(s.symbol, {
+          symbol: s.symbol,
+          category: 'accumulating',
+          priceChange: s.priceChangePercent,
+          volume: s.volume,
+          volumeIntensity: s.volumePerPctMove,
+          priority: s.volumePerPctMove > 1000000 ? 'high' : 'medium'
+        });
+      }
+    }
+
+    // 3. TOP MOVERS (both directions) - catch coins making big moves
+    const movers = await getTopMovers(100);
+    for (const m of movers) {
+      if (!isValidCoin(m.symbol)) continue;
+      // Only add if not already in and has decent volume
+      if (!discovered.has(m.symbol) && m.volume > 500000) {
+        discovered.set(m.symbol, {
+          symbol: m.symbol,
+          category: m.priceChangePercent > 0 ? 'mover_up' : 'mover_down',
+          priceChange: m.priceChangePercent,
+          volume: m.volume,
+          priority: Math.abs(m.priceChangePercent) >= 8 ? 'high' : 'low'
+        });
+      }
+    }
+
+    const trending = Array.from(discovered.values())
+      // Sort by priority, then by absolute price change
+      .sort((a, b) => {
+        const priorityOrder = { high: 0, medium: 1, low: 2 };
+        const pDiff = (priorityOrder[a.priority] || 2) - (priorityOrder[b.priority] || 2);
+        if (pDiff !== 0) return pDiff;
+        return Math.abs(b.priceChange) - Math.abs(a.priceChange);
+      })
+      .slice(0, 30); // Top 30 discovered coins
 
     discoveredCoinsCache = trending;
     discoveredCoinsFetchedAt = now;
 
     if (trending.length > 0) {
-      console.log(`[SPOT DCA] Discovered ${trending.length} trending coins: ${trending.map(t => `${t.symbol}(+${t.priceChange.toFixed(1)}%)`).join(', ')}`);
+      const highPriority = trending.filter(t => t.priority === 'high');
+      const gainers = trending.filter(t => t.category === 'gainer');
+      const accum = trending.filter(t => t.category === 'accumulating');
+      console.log(`[SPOT DCA] Discovered ${trending.length} coins (${highPriority.length} high priority, ${gainers.length} gainers, ${accum.length} accumulating)`);
+      if (highPriority.length > 0) {
+        console.log(`[SPOT DCA] High priority: ${highPriority.slice(0, 8).map(t => `${t.symbol}(${t.priceChange >= 0 ? '+' : ''}${t.priceChange.toFixed(1)}%)`).join(', ')}`);
+      }
     }
 
     return trending;
   } catch (err) {
-    console.warn('[SPOT DCA] Failed to discover trending coins:', err.message);
+    console.warn('[SPOT DCA] Discovery error:', err.message);
     return discoveredCoinsCache;
   }
 }
