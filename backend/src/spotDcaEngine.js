@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { buildDcaPlan, DEFAULT_DCA_SYMBOLS } = require('./dcaPlanner');
 const { getSpotExchangeInfo, getSpotCandles, getTopGainers, getVolumeSurgers, getTopMovers } = require('./binance');
+const { getTopOpportunities: getScannerOpportunities } = require('./coinScanner');
 const { calculateIndicators } = require('./indicators');
 const { predictNextMove } = require('./ai');
 
@@ -278,6 +279,26 @@ async function discoverTrendingCoins() {
           priority: Math.abs(m.priceChangePercent) >= 8 ? 'high' : 'low'
         });
       }
+    }
+
+    // 4. SCANNER OPPORTUNITIES - sniper-ready coins from full market scan
+    try {
+      const scannerOpps = getScannerOpportunities(30);
+      for (const opp of scannerOpps) {
+        if (!isValidCoin(opp.symbol)) continue;
+        if (!discovered.has(opp.symbol) && opp.score >= 40) {
+          discovered.set(opp.symbol, {
+            symbol: opp.symbol,
+            category: 'scanner',
+            priceChange: opp.priceChange24h || 0,
+            score: opp.score,
+            sniperActive: opp.sniperActive,
+            priority: opp.score >= 60 ? 'high' : 'medium'
+          });
+        }
+      }
+    } catch (err) {
+      // Scanner not ready yet
     }
 
     const trending = Array.from(discovered.values())

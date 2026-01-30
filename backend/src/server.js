@@ -30,6 +30,9 @@ const { fetchFundingRates, getSymbolFunding, getLeverageAnalysis, fetchLongShort
 const { runHistoricalAnalysis, getHistoricalContext } = require('./historicalLearning');
 const { getPendingConfirmations, cleanupExpired: cleanupSniperExpired } = require('./sniperConfirmation');
 
+// Coin Scanner - scans ALL futures for sniper opportunities
+const { startScanner, getTopOpportunities, getSniperOpportunities, getScannerStatus, getScanResult } = require('./coinScanner');
+
 const PORT = Number(process.env.PORT || 5000);
 const POLL_MS = Number(process.env.POLL_MS || 15_000);
 // If SYMBOLS is "ALL" or empty, auto-discover all futures symbols
@@ -83,6 +86,7 @@ let pollers = [];
 configureWebPush();
 bootstrapTracking();
 startSpotDcaEngine({ latestCandles, latestSignals });
+startScanner(); // Start coin scanner for all futures
 
 io.on('connection', (socket) => {
   socket.emit('bootstrap', {
@@ -535,6 +539,69 @@ app.get('/api/ai/sniper-pending', (_req, res) => {
     res.json({ pending, count: pending.length });
   } catch (error) {
     res.status(500).json({ error: 'Failed to get pending confirmations', message: error.message });
+  }
+});
+
+// Coin Scanner - ALL futures opportunities
+app.get('/api/scanner/status', (_req, res) => {
+  try {
+    const status = getScannerStatus();
+    res.json(status);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get scanner status', message: error.message });
+  }
+});
+
+app.get('/api/scanner/opportunities', (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit || '20');
+    const direction = req.query.direction; // 'long' or 'short'
+
+    let opportunities;
+    if (direction) {
+      opportunities = getTopOpportunities(100)
+        .filter(o => o.direction === direction)
+        .slice(0, limit);
+    } else {
+      opportunities = getTopOpportunities(limit);
+    }
+
+    res.json({
+      count: opportunities.length,
+      opportunities
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get opportunities', message: error.message });
+  }
+});
+
+app.get('/api/scanner/sniper', (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit || '10');
+    const opportunities = getSniperOpportunities(limit);
+
+    res.json({
+      count: opportunities.length,
+      sniperReady: opportunities
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get sniper opportunities', message: error.message });
+  }
+});
+
+app.get('/api/scanner/coin/:symbol', (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const result = getScanResult(symbol);
+
+    if (!result) {
+      res.status(404).json({ error: 'Coin not found in scan results', symbol });
+      return;
+    }
+
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get coin scan result', message: error.message });
   }
 });
 
