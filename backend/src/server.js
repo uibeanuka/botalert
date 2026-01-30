@@ -26,6 +26,10 @@ const { fetchFearGreedIndex, fetchCryptoNews, getSymbolSentiment, getMarketSenti
 const { fetchWhaleAlerts, getSymbolWhaleActivity } = require('./whaleAlerts');
 const { fetchFundingRates, getSymbolFunding, getLeverageAnalysis, fetchLongShortRatio } = require('./fundingRates');
 
+// Historical Learning & Sniper Confirmation
+const { runHistoricalAnalysis, getHistoricalContext } = require('./historicalLearning');
+const { getPendingConfirmations, cleanupExpired: cleanupSniperExpired } = require('./sniperConfirmation');
+
 const PORT = Number(process.env.PORT || 5000);
 const POLL_MS = Number(process.env.POLL_MS || 15_000);
 // If SYMBOLS is "ALL" or empty, auto-discover all futures symbols
@@ -260,7 +264,7 @@ app.get('/api/ai/ml-signal/:symbol', async (req, res) => {
 
     const indicators = calculateIndicators(candles);
     const mlSignal = generateMLSignal(indicators);
-    const standardSignal = predictNextMove(indicators);
+    const standardSignal = predictNextMove(indicators, null, symbol);
 
     res.json({
       symbol,
@@ -496,6 +500,44 @@ app.get('/api/ai/learning', (_req, res) => {
   }
 });
 
+// Historical Analysis (2017+ data)
+app.get('/api/ai/historical/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const yearsBack = parseInt(req.query.years || '5');
+    const interval = req.query.interval || '1d';
+
+    console.log(`[API] Running historical analysis for ${symbol} (${yearsBack} years)...`);
+    const analysis = await runHistoricalAnalysis(symbol, interval, yearsBack);
+    res.json(analysis);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to run historical analysis', message: error.message });
+  }
+});
+
+// Historical Context for Trading Decisions
+app.get('/api/ai/historical-context/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const currentPrice = parseFloat(req.query.price || '0');
+
+    const context = await getHistoricalContext(symbol, currentPrice);
+    res.json(context || { error: 'No historical context available' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get historical context', message: error.message });
+  }
+});
+
+// Sniper Confirmation Status
+app.get('/api/ai/sniper-pending', (_req, res) => {
+  try {
+    const pending = getPendingConfirmations();
+    res.json({ pending, count: pending.length });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get pending confirmations', message: error.message });
+  }
+});
+
 // AI Learned Recommendation
 app.get('/api/ai/recommendation/:symbol', async (req, res) => {
   try {
@@ -510,7 +552,7 @@ app.get('/api/ai/recommendation/:symbol', async (req, res) => {
 
     const indicators = calculateIndicators(candles);
     const learned = getLearnedRecommendation(indicators);
-    const standard = predictNextMove(indicators);
+    const standard = predictNextMove(indicators, null, symbol);
 
     res.json({
       symbol,
@@ -557,7 +599,7 @@ app.get('/api/ai/full-analysis/:symbol', async (req, res) => {
     }
 
     const indicators = calculateIndicators(candles);
-    const standardAI = predictNextMove(indicators);
+    const standardAI = predictNextMove(indicators, null, symbol);
     const mlSignal = generateMLSignal(indicators);
     const patterns = detectChartPatterns(candles);
     const sniper = analyzeSniperSetup(candles, indicators);
@@ -779,7 +821,7 @@ app.get('/api/intelligence/:symbol', async (req, res) => {
 
     // Get technical analysis
     const indicators = calculateIndicators(candles);
-    const standardAI = predictNextMove(indicators);
+    const standardAI = predictNextMove(indicators, null, symbol);
     const mlSignal = generateMLSignal(indicators);
     const patterns = detectChartPatterns(candles);
     const sniper = analyzeSniperSetup(candles, indicators);
@@ -869,7 +911,7 @@ async function pollSymbol(symbol, interval) {
     latestCandles.set(key, candles);
 
     const indicators = calculateIndicators(candles);
-    const ai = predictNextMove(indicators);
+    const ai = predictNextMove(indicators, null, symbol);
     const signal = deriveSignal(symbol, interval, indicators, ai);
 
     if (signal) {
@@ -1119,7 +1161,7 @@ async function scanVolumeSurges() {
         }
 
         // Run AI prediction to understand WHY it's moving
-        const ai = predictNextMove(indicators5m);
+        const ai = predictNextMove(indicators5m, null, surger.symbol);
         scanned++;
 
         // Record the surge pattern for learning
