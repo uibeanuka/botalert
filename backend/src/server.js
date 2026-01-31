@@ -42,6 +42,9 @@ const mongo = require('./mongoStorage');
 // Deep Trade Analyzer - WHY trades succeed/fail
 const { getAnalysisStats, getLearningInsights: getTradeAnalysisInsights, getRecommendedStyle } = require('./tradeAnalyzer');
 
+// Candle Behavior Simulator - learns from synthetic/historical candle flow
+const { startCandleSimulator, getSimStatus: getCandleSimStatus, feedRealCandles, runSimulationCycle } = require('./candleSimulator');
+
 const PORT = Number(process.env.PORT || 5000);
 const POLL_MS = Number(process.env.POLL_MS || 15_000);
 // If SYMBOLS is "ALL" or empty, auto-discover all futures symbols
@@ -633,6 +636,25 @@ app.post('/api/simulation/reset', (_req, res) => {
   }
 });
 
+// === CANDLE BEHAVIOR SIMULATOR ===
+app.get('/api/candle-sim/status', (_req, res) => {
+  try {
+    const status = getCandleSimStatus();
+    res.json(status);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get candle sim status', message: error.message });
+  }
+});
+
+app.post('/api/candle-sim/run', async (_req, res) => {
+  try {
+    const results = await runSimulationCycle();
+    res.json({ success: true, results });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to run candle simulation', message: error.message });
+  }
+});
+
 // === LEARNING INSIGHTS (MongoDB) ===
 app.get('/api/learning/insights', async (_req, res) => {
   try {
@@ -1193,6 +1215,9 @@ app.get('/api/intelligence/:symbol', async (req, res) => {
     console.warn('[SERVER] MongoDB connection failed:', err.message);
   }
 
+  // Start candle behavior simulator for accelerated learning
+  startCandleSimulator();
+
   server.listen(PORT, () => {
     console.log(`Backend listening on http://localhost:${PORT}`);
   });
@@ -1203,6 +1228,11 @@ async function pollSymbol(symbol, interval) {
     const candles = await getCandles(symbol, interval);
     const key = buildKey(symbol, interval);
     latestCandles.set(key, candles);
+
+    // Feed candles to simulator for pattern learning (only 1m and 5m for faster learning)
+    if (interval === '1m' || interval === '5m') {
+      feedRealCandles(candles, symbol);
+    }
 
     const indicators = calculateIndicators(candles);
     const ai = predictNextMove(indicators, null, symbol);
