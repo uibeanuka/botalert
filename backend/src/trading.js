@@ -1,7 +1,7 @@
 const axios = require('axios');
 const crypto = require('crypto');
 const { recordPattern, getStats: getPatternStats } = require('./patternMemory');
-const { learnFromTrade, learnFromLiquidation, learnFromSevereLoss, isDangerousCondition, analyzeTradeFailure, checkFailurePatternRisk } = require('./aiLearning');
+const { learnFromTrade, learnFromLiquidation, learnFromSevereLoss, isDangerousCondition, analyzeTradeFailure, checkFailurePatternRisk, extractEntryConditions, updateEntryConditionPerformance, checkEntryQuality } = require('./aiLearning');
 const { recordTrade: recordRiskTrade, checkTradingAllowed, calculatePositionSize: riskCalcPositionSize } = require('./riskManager');
 const { addTrainingSample } = require('./mlSignalGenerator');
 
@@ -322,6 +322,42 @@ async function executeTrade(signal) {
     }
   }
 
+  // === ENTRY QUALITY CHECK - Learn from what works ===
+  // Extract current entry conditions and check quality based on historical performance
+  const entryConditions = extractEntryConditions(indicators);
+  const entryQuality = checkEntryQuality(indicators, direction);
+
+  // Block trades with AVOID quality (matches multiple losing patterns)
+  if (entryQuality.quality === 'AVOID') {
+    console.log(`⛔ [LEARN] BLOCKED ${signal.symbol}: Entry quality AVOID - ${entryQuality.reason}`);
+    return {
+      executed: false,
+      reason: `Entry blocked by learning: ${entryQuality.reason}`,
+      entryQuality: entryQuality.quality,
+      conditions: entryConditions
+    };
+  }
+
+  // POOR quality entries need extra confidence (+15%)
+  if (entryQuality.quality === 'POOR') {
+    const poorThreshold = effectiveThreshold + 0.15;
+    if (confidence < poorThreshold) {
+      console.log(`⚠️ [LEARN] POOR ${signal.symbol}: ${entryQuality.reason} - needs ${(poorThreshold * 100).toFixed(0)}% confidence`);
+      return {
+        executed: false,
+        reason: `Poor entry (${entryQuality.reason}) requires ${(poorThreshold * 100).toFixed(0)}% confidence`,
+        entryQuality: entryQuality.quality,
+        conditions: entryConditions
+      };
+    }
+  }
+
+  // EXCELLENT quality entries get a confidence boost (lower threshold by 5%)
+  if (entryQuality.quality === 'EXCELLENT') {
+    effectiveThreshold = Math.max(0.45, effectiveThreshold - 0.05);
+    console.log(`✨ [LEARN] EXCELLENT ${signal.symbol}: ${entryQuality.reason} - threshold lowered to ${(effectiveThreshold * 100).toFixed(0)}%`);
+  }
+
   // Check daily trade limit
   const today = new Date().toDateString();
   if (dailyTrades.date !== today) {
@@ -458,7 +494,11 @@ async function executeTrade(signal) {
       hasSL: !!slOrder,
       openTime: Date.now(),
       peakProfit: 0,
-      signal
+      signal,
+      // Entry condition learning
+      entryConditions,
+      entryQuality: entryQuality.quality,
+      expectedWinRate: entryQuality.expectedWinRate
     });
 
     // Update daily trades count
@@ -607,6 +647,15 @@ async function closePosition(symbol, reason = 'manual', currentPrice = null, exi
         if (failures.length > 0) {
           console.log(`📊 [LEARN] ${symbol} failure patterns detected: ${failures.map(f => f.type).join(', ')}`);
         }
+      }
+
+      // === LEARN FROM ENTRY CONDITIONS ===
+      // Update entry condition performance for ALL trades (wins AND losses)
+      // This helps the bot learn which entry conditions lead to success
+      if (position.entryConditions && position.entryConditions.length > 0) {
+        updateEntryConditionPerformance(position.entryConditions, result, pnlPercent);
+        const winLoss = result === 'win' || pnlPercent > 0 ? '✅ WIN' : '❌ LOSS';
+        console.log(`📈 [LEARN] ${symbol} ${winLoss}: Updated ${position.entryConditions.length} entry conditions (${position.entryConditions.slice(0, 3).join(', ')}...)`);
       }
     } catch (e) {
       // AI learning might not be loaded

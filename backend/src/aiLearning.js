@@ -105,6 +105,61 @@ let learningState = {
   // Pattern sequence tracking - what happened before and after entry
   tradeSequences: [], // Stores last 100 trade sequences for pattern analysis
 
+  // === ENTRY CONDITION LEARNING ===
+  // Track what conditions triggered successful vs failed trades
+  entryConditions: {
+    // RSI conditions
+    rsiOversold: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    rsiOverbought: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    rsiNeutral: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+
+    // MACD conditions
+    macdBullish: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    macdBearish: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    macdCrossUp: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    macdCrossDown: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+
+    // Trend conditions
+    strongUptrend: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    strongDowntrend: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    weakTrend: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    noTrend: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+
+    // Volume conditions
+    volumeSpike: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    volumeSurge: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    lowVolume: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    normalVolume: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+
+    // Sniper conditions
+    sniperActive: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    divergenceDetected: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    squeezeBreakout: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    momentumBuilding: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+
+    // Support/Resistance
+    nearSupport: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    nearResistance: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    breakoutUp: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    breakoutDown: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+
+    // Funding rate conditions
+    extremeFundingLong: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    extremeFundingShort: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    normalFunding: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+
+    // Pattern conditions
+    bullishPattern: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] },
+    bearishPattern: { trades: 0, wins: 0, avgReturn: 0, bestWith: [] }
+  },
+
+  // Combo tracking - which combinations of conditions work best
+  entryComboPerformance: {}, // "rsiOversold+volumeSpike+divergenceDetected" -> { trades, wins, avgReturn }
+
+  // Best performing entry setups (auto-updated)
+  bestEntrySetups: [], // Sorted by win rate, top 10
+  worstEntrySetups: [], // Sorted by loss rate, bottom 10
+
   // Statistics
   totalLearnings: 0,
   totalLiquidations: 0,
@@ -1117,6 +1172,344 @@ function round(value, decimals = 2) {
   return Math.round(value * factor) / factor;
 }
 
+// ============================================================
+// === ENTRY CONDITION LEARNING - Learn what works best ===
+// ============================================================
+
+/**
+ * Extract all entry conditions present in current indicators
+ * Returns array of condition names that are active
+ */
+function extractEntryConditions(indicators) {
+  if (!indicators) return [];
+
+  const conditions = [];
+
+  // RSI conditions
+  if (indicators.rsi !== undefined) {
+    if (indicators.rsi < 30) conditions.push('rsiOversold');
+    else if (indicators.rsi > 70) conditions.push('rsiOverbought');
+    else conditions.push('rsiNeutral');
+  }
+
+  // MACD conditions
+  if (indicators.macd) {
+    if (indicators.macd.histogram > 0) conditions.push('macdBullish');
+    else if (indicators.macd.histogram < 0) conditions.push('macdBearish');
+
+    // MACD cross detection (simplified)
+    if (indicators.macd.macd > indicators.macd.signal && indicators.macd.histogram > 0 && indicators.macd.histogram < 0.5) {
+      conditions.push('macdCrossUp');
+    } else if (indicators.macd.macd < indicators.macd.signal && indicators.macd.histogram < 0 && indicators.macd.histogram > -0.5) {
+      conditions.push('macdCrossDown');
+    }
+  }
+
+  // Trend conditions
+  if (indicators.trend?.direction) {
+    if (indicators.trend.direction.includes('STRONG_UP')) conditions.push('strongUptrend');
+    else if (indicators.trend.direction.includes('STRONG_DOWN')) conditions.push('strongDowntrend');
+    else if (indicators.trend.direction.includes('UP') || indicators.trend.direction.includes('DOWN')) conditions.push('weakTrend');
+    else conditions.push('noTrend');
+  }
+
+  // Volume conditions
+  if (indicators.volumeSpike) conditions.push('volumeSpike');
+  if (indicators.sniperSignals?.volumeSurge?.detected) {
+    conditions.push('volumeSurge');
+    if (indicators.sniperSignals.volumeSurge.isExplosive) conditions.push('explosiveVolume');
+  }
+  if (indicators.volumeRatio !== undefined) {
+    if (indicators.volumeRatio < 0.5) conditions.push('lowVolume');
+    else if (indicators.volumeRatio >= 0.5 && indicators.volumeRatio <= 1.5) conditions.push('normalVolume');
+  }
+
+  // Sniper conditions
+  if (indicators.sniperSignals?.score?.isSniper) conditions.push('sniperActive');
+  if (indicators.sniperSignals?.divergence?.detected) {
+    conditions.push('divergenceDetected');
+    conditions.push(`divergence_${indicators.sniperSignals.divergence.type}`);
+  }
+  if (indicators.sniperSignals?.squeeze?.inSqueeze) conditions.push('inSqueeze');
+  if (indicators.sniperSignals?.squeeze?.breakoutReady) conditions.push('squeezeBreakout');
+  if (indicators.sniperSignals?.momentumBuilding?.detected) conditions.push('momentumBuilding');
+  if (indicators.sniperSignals?.volumeAccumulation?.detected) conditions.push('volumeAccumulation');
+
+  // Support/Resistance
+  if (indicators.support && indicators.currentPrice) {
+    const distToSupport = (indicators.currentPrice - indicators.support) / indicators.currentPrice * 100;
+    if (distToSupport < 2) conditions.push('nearSupport');
+  }
+  if (indicators.resistance && indicators.currentPrice) {
+    const distToResistance = (indicators.resistance - indicators.currentPrice) / indicators.currentPrice * 100;
+    if (distToResistance < 2) conditions.push('nearResistance');
+  }
+  if (indicators.breakout?.detected) {
+    if (indicators.breakout.direction === 'up') conditions.push('breakoutUp');
+    else if (indicators.breakout.direction === 'down') conditions.push('breakoutDown');
+  }
+
+  // Funding rate
+  if (indicators.fundingRate !== undefined) {
+    if (indicators.fundingRate >= 0.001) conditions.push('extremeFundingLong');
+    else if (indicators.fundingRate <= -0.001) conditions.push('extremeFundingShort');
+    else conditions.push('normalFunding');
+  }
+
+  // Candlestick patterns
+  if (indicators.patterns?.length > 0) {
+    const bullishPatterns = ['BULLISH_ENGULFING', 'HAMMER', 'MORNING_STAR', 'PIERCING', 'THREE_WHITE_SOLDIERS'];
+    const bearishPatterns = ['BEARISH_ENGULFING', 'SHOOTING_STAR', 'EVENING_STAR', 'DARK_CLOUD', 'THREE_BLACK_CROWS'];
+
+    if (indicators.patterns.some(p => bullishPatterns.includes(p))) conditions.push('bullishPattern');
+    if (indicators.patterns.some(p => bearishPatterns.includes(p))) conditions.push('bearishPattern');
+  }
+
+  // Bollinger Band position
+  if (indicators.bollinger?.pb !== undefined) {
+    if (indicators.bollinger.pb < 0.1) conditions.push('bbLowerBand');
+    else if (indicators.bollinger.pb > 0.9) conditions.push('bbUpperBand');
+    else if (indicators.bollinger.pb >= 0.4 && indicators.bollinger.pb <= 0.6) conditions.push('bbMiddle');
+  }
+
+  return conditions;
+}
+
+/**
+ * Update entry condition performance after trade closes
+ */
+function updateEntryConditionPerformance(entryConditions, result, pnlPercent) {
+  if (!entryConditions || entryConditions.length === 0) return;
+
+  const isWin = result === 'win' || pnlPercent > 0;
+
+  // Update individual conditions
+  for (const condition of entryConditions) {
+    if (learningState.entryConditions[condition]) {
+      const ec = learningState.entryConditions[condition];
+      ec.trades++;
+      if (isWin) ec.wins++;
+      ec.avgReturn = (ec.avgReturn * (ec.trades - 1) + pnlPercent) / ec.trades;
+
+      // Track which other conditions this worked well with
+      if (isWin && pnlPercent > 1) {
+        for (const other of entryConditions) {
+          if (other !== condition && !ec.bestWith.includes(other)) {
+            ec.bestWith.push(other);
+            if (ec.bestWith.length > 5) ec.bestWith.shift(); // Keep last 5
+          }
+        }
+      }
+    }
+  }
+
+  // Update combo performance
+  if (entryConditions.length >= 2) {
+    const comboKey = entryConditions.sort().join('+');
+    if (!learningState.entryComboPerformance[comboKey]) {
+      learningState.entryComboPerformance[comboKey] = { trades: 0, wins: 0, avgReturn: 0 };
+    }
+    const combo = learningState.entryComboPerformance[comboKey];
+    combo.trades++;
+    if (isWin) combo.wins++;
+    combo.avgReturn = (combo.avgReturn * (combo.trades - 1) + pnlPercent) / combo.trades;
+  }
+
+  // Update best/worst entry setups
+  updateBestWorstSetups();
+}
+
+/**
+ * Update the best and worst entry setups lists
+ */
+function updateBestWorstSetups() {
+  // Get all entry conditions with enough samples
+  const conditionStats = Object.entries(learningState.entryConditions)
+    .filter(([, stats]) => stats.trades >= 5)
+    .map(([name, stats]) => ({
+      name,
+      winRate: stats.wins / stats.trades,
+      avgReturn: stats.avgReturn,
+      trades: stats.trades,
+      bestWith: stats.bestWith
+    }));
+
+  // Sort by win rate for best setups
+  learningState.bestEntrySetups = conditionStats
+    .filter(c => c.winRate >= 0.5)
+    .sort((a, b) => b.winRate - a.winRate)
+    .slice(0, 10);
+
+  // Sort by loss rate for worst setups
+  learningState.worstEntrySetups = conditionStats
+    .filter(c => c.winRate < 0.5)
+    .sort((a, b) => a.winRate - b.winRate)
+    .slice(0, 10);
+
+  // Also check combos
+  const comboStats = Object.entries(learningState.entryComboPerformance)
+    .filter(([, stats]) => stats.trades >= 3)
+    .map(([name, stats]) => ({
+      name,
+      winRate: stats.wins / stats.trades,
+      avgReturn: stats.avgReturn,
+      trades: stats.trades,
+      isCombo: true
+    }));
+
+  // Add top combos to best setups
+  const topCombos = comboStats
+    .filter(c => c.winRate >= 0.6)
+    .sort((a, b) => b.winRate - a.winRate)
+    .slice(0, 5);
+
+  learningState.bestEntrySetups = [
+    ...topCombos,
+    ...learningState.bestEntrySetups
+  ].slice(0, 10);
+}
+
+/**
+ * Check entry quality against learned patterns
+ * Returns recommendation: EXCELLENT, GOOD, FAIR, POOR, AVOID
+ */
+function checkEntryQuality(indicators, direction) {
+  const conditions = extractEntryConditions(indicators);
+
+  if (conditions.length === 0) {
+    return { quality: 'UNKNOWN', reason: 'No entry conditions detected', conditions: [] };
+  }
+
+  // Check how many conditions match best setups
+  const bestConditions = learningState.bestEntrySetups
+    .filter(s => !s.isCombo)
+    .map(s => s.name);
+  const worstConditions = learningState.worstEntrySetups.map(s => s.name);
+
+  const matchingBest = conditions.filter(c => bestConditions.includes(c));
+  const matchingWorst = conditions.filter(c => worstConditions.includes(c));
+
+  // Calculate expected win rate based on matching conditions
+  let expectedWinRate = 0.5; // Neutral baseline
+  let sampleCount = 0;
+
+  for (const condition of conditions) {
+    if (learningState.entryConditions[condition]?.trades >= 5) {
+      const ec = learningState.entryConditions[condition];
+      const conditionWinRate = ec.wins / ec.trades;
+      expectedWinRate = (expectedWinRate * sampleCount + conditionWinRate) / (sampleCount + 1);
+      sampleCount++;
+    }
+  }
+
+  // Check combo performance
+  const comboKey = conditions.sort().join('+');
+  const comboStats = learningState.entryComboPerformance[comboKey];
+  if (comboStats?.trades >= 3) {
+    const comboWinRate = comboStats.wins / comboStats.trades;
+    expectedWinRate = (expectedWinRate + comboWinRate) / 2; // Blend with combo rate
+  }
+
+  // Determine quality
+  let quality, reason;
+
+  if (matchingWorst.length >= 2 || expectedWinRate < 0.35) {
+    quality = 'AVOID';
+    reason = `Matches ${matchingWorst.length} losing patterns: ${matchingWorst.join(', ')}`;
+  } else if (matchingWorst.length >= 1 && matchingBest.length === 0) {
+    quality = 'POOR';
+    reason = `Matches losing pattern: ${matchingWorst.join(', ')}`;
+  } else if (matchingBest.length >= 2 || expectedWinRate >= 0.65) {
+    quality = 'EXCELLENT';
+    reason = `Matches ${matchingBest.length} winning patterns (${(expectedWinRate * 100).toFixed(0)}% expected win rate)`;
+  } else if (matchingBest.length >= 1 || expectedWinRate >= 0.55) {
+    quality = 'GOOD';
+    reason = `Matches winning pattern: ${matchingBest.join(', ')}`;
+  } else {
+    quality = 'FAIR';
+    reason = `Neutral conditions (${(expectedWinRate * 100).toFixed(0)}% expected win rate)`;
+  }
+
+  return {
+    quality,
+    reason,
+    conditions,
+    matchingBest,
+    matchingWorst,
+    expectedWinRate: round(expectedWinRate, 2),
+    comboStats: comboStats || null
+  };
+}
+
+/**
+ * Get best entry conditions for a direction
+ */
+function getBestEntryConditions(direction = 'long') {
+  const best = learningState.bestEntrySetups.slice(0, 5);
+  const worst = learningState.worstEntrySetups.slice(0, 5);
+
+  return {
+    recommended: best.map(s => ({
+      condition: s.name,
+      winRate: round(s.winRate * 100, 1),
+      avgReturn: round(s.avgReturn, 2),
+      trades: s.trades,
+      bestWith: s.bestWith || []
+    })),
+    avoid: worst.map(s => ({
+      condition: s.name,
+      winRate: round(s.winRate * 100, 1),
+      avgReturn: round(s.avgReturn, 2),
+      trades: s.trades
+    })),
+    topCombos: Object.entries(learningState.entryComboPerformance)
+      .filter(([, stats]) => stats.trades >= 3 && stats.wins / stats.trades >= 0.6)
+      .map(([name, stats]) => ({
+        combo: name,
+        winRate: round((stats.wins / stats.trades) * 100, 1),
+        avgReturn: round(stats.avgReturn, 2),
+        trades: stats.trades
+      }))
+      .sort((a, b) => b.winRate - a.winRate)
+      .slice(0, 5)
+  };
+}
+
+/**
+ * Get entry condition statistics for dashboard
+ */
+function getEntryConditionStats() {
+  const stats = {};
+
+  for (const [name, data] of Object.entries(learningState.entryConditions)) {
+    if (data.trades > 0) {
+      stats[name] = {
+        trades: data.trades,
+        wins: data.wins,
+        winRate: round((data.wins / data.trades) * 100, 1),
+        avgReturn: round(data.avgReturn, 2),
+        bestWith: data.bestWith.slice(0, 3)
+      };
+    }
+  }
+
+  return {
+    conditions: stats,
+    bestSetups: learningState.bestEntrySetups,
+    worstSetups: learningState.worstEntrySetups,
+    topCombos: Object.entries(learningState.entryComboPerformance)
+      .filter(([, s]) => s.trades >= 3)
+      .map(([name, s]) => ({
+        combo: name,
+        winRate: round((s.wins / s.trades) * 100, 1),
+        avgReturn: round(s.avgReturn, 2),
+        trades: s.trades
+      }))
+      .sort((a, b) => b.trades - a.trades)
+      .slice(0, 20)
+  };
+}
+
 // Initialize on load
 loadLearningData();
 
@@ -1137,5 +1530,11 @@ module.exports = {
   saveLearningData,
   loadLearningData,
   createState,
-  getQValue
+  getQValue,
+  // Entry condition learning
+  extractEntryConditions,
+  updateEntryConditionPerformance,
+  checkEntryQuality,
+  getBestEntryConditions,
+  getEntryConditionStats
 };
