@@ -2,12 +2,18 @@
  * AI Learning Engine
  * Continuously learns from trades, market conditions, and outcomes
  * Implements reinforcement learning concepts for strategy improvement
+ *
+ * Storage: MongoDB (primary) + JSON file (backup)
  */
 
 const fs = require('fs');
 const path = require('path');
+const mongo = require('./mongoStorage');
 
 const LEARNING_DATA_FILE = path.join(__dirname, '../data/ai_learning.json');
+
+// MongoDB connection status
+let mongoInitialized = false;
 
 // Learning state
 let learningState = {
@@ -169,30 +175,72 @@ let learningState = {
 };
 
 // Load learning data on startup
-function loadLearningData() {
+async function initMongo() {
+  if (mongoInitialized) return;
+  try {
+    await mongo.connect();
+    mongoInitialized = true;
+  } catch (err) {
+    console.warn('[AI LEARN] MongoDB init failed, using file storage:', err.message);
+  }
+}
+
+async function loadLearningData() {
+  // Try MongoDB first
+  try {
+    await initMongo();
+    if (mongo.isAvailable()) {
+      const mongoState = await mongo.loadLearningState();
+      if (mongoState) {
+        learningState = { ...learningState, ...mongoState };
+        console.log(`[AI LEARN] Loaded ${learningState.totalLearnings || 0} learnings from MongoDB`);
+        return;
+      }
+    }
+  } catch (err) {
+    console.warn('[AI LEARN] MongoDB load failed:', err.message);
+  }
+
+  // Fallback to file
   try {
     if (fs.existsSync(LEARNING_DATA_FILE)) {
       const data = fs.readFileSync(LEARNING_DATA_FILE, 'utf-8');
       learningState = { ...learningState, ...JSON.parse(data) };
-      console.log(`[AI LEARN] Loaded ${learningState.totalLearnings} learnings`);
+      console.log(`[AI LEARN] Loaded ${learningState.totalLearnings || 0} learnings from file`);
+
+      // Sync to MongoDB if available
+      if (mongo.isAvailable()) {
+        await mongo.saveLearningState(learningState);
+        console.log('[AI LEARN] Synced file data to MongoDB');
+      }
     }
   } catch (err) {
     console.warn('[AI LEARN] Could not load learning data:', err.message);
   }
 }
 
-// Save learning data
-function saveLearningData() {
+// Save learning data (to both MongoDB and file for redundancy)
+async function saveLearningData() {
+  learningState.lastUpdate = Date.now();
+
+  // Save to MongoDB (primary)
+  if (mongo.isAvailable()) {
+    try {
+      await mongo.saveLearningState(learningState);
+    } catch (err) {
+      console.warn('[AI LEARN] MongoDB save failed:', err.message);
+    }
+  }
+
+  // Save to file (backup)
   try {
     const dir = path.dirname(LEARNING_DATA_FILE);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-
-    learningState.lastUpdate = Date.now();
     fs.writeFileSync(LEARNING_DATA_FILE, JSON.stringify(learningState, null, 2));
   } catch (err) {
-    console.warn('[AI LEARN] Could not save learning data:', err.message);
+    console.warn('[AI LEARN] Could not save learning data to file:', err.message);
   }
 }
 
@@ -362,6 +410,25 @@ function learnFromTrade(tradeData) {
 
   // Track learning
   learningState.totalLearnings++;
+
+  // Record to MongoDB for analytics
+  if (mongo.isAvailable()) {
+    mongo.recordTrade({
+      symbol,
+      direction,
+      signal,
+      pnlPercent,
+      result,
+      regime,
+      timestamp: timestamp || Date.now(),
+      indicators: {
+        rsi: indicators?.rsi,
+        macd: indicators?.macd?.histogram,
+        trend: indicators?.trend?.direction,
+        volume: indicators?.volume
+      }
+    }).catch(() => {}); // Fire and forget
+  }
 
   // Save periodically
   if (learningState.totalLearnings % 10 === 0) {
@@ -689,6 +756,19 @@ function analyzeTradeFailure(tradeData) {
   // Keep only last 100 sequences
   if (learningState.tradeSequences.length > 100) {
     learningState.tradeSequences = learningState.tradeSequences.slice(-100);
+  }
+
+  // Record failure patterns to MongoDB for analysis
+  if (mongo.isAvailable() && failures.length > 0) {
+    for (const failure of failures) {
+      mongo.recordFailurePattern(failure.type, symbol, {
+        direction,
+        pnlPercent,
+        holdTime,
+        confidence: failure.confidence,
+        details: failure.details
+      }).catch(() => {}); // Fire and forget
+    }
   }
 
   return failures;
@@ -1299,6 +1379,11 @@ function updateEntryConditionPerformance(entryConditions, result, pnlPercent) {
             if (ec.bestWith.length > 5) ec.bestWith.shift(); // Keep last 5
           }
         }
+      }
+
+      // Record to MongoDB
+      if (mongo.isAvailable()) {
+        mongo.updateEntryCondition(condition, isWin, pnlPercent).catch(() => {});
       }
     }
   }

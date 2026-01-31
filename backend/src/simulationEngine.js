@@ -6,11 +6,14 @@
  * - Learn from more data points
  * - Understand market behavior
  * - Improve sniper entry timing
+ *
+ * Storage: MongoDB (primary) + JSON file (backup)
  */
 
 const fs = require('fs');
 const path = require('path');
 const { extractEntryConditions, updateEntryConditionPerformance, analyzeTradeFailure, learnFromTrade, checkEntryQuality } = require('./aiLearning');
+const mongo = require('./mongoStorage');
 
 const SIMULATION_DATA_FILE = path.join(__dirname, '../data/simulation_state.json');
 
@@ -60,8 +63,27 @@ let simState = {
   startTime: Date.now()
 };
 
-// Load simulation state
-function loadSimState() {
+// Load simulation state - try MongoDB first, then file
+async function loadSimState() {
+  // Try MongoDB first
+  try {
+    if (mongo.isAvailable()) {
+      const mongoState = await mongo.loadSimulationState();
+      if (mongoState) {
+        simState = {
+          ...simState,
+          ...mongoState,
+          positions: new Map(Object.entries(mongoState.positions || {}))
+        };
+        console.log(`[SIM] Loaded from MongoDB: $${simState.balance.toFixed(2)} balance, ${simState.stats.totalTrades} trades`);
+        return;
+      }
+    }
+  } catch (err) {
+    console.warn('[SIM] MongoDB load failed:', err.message);
+  }
+
+  // Fallback to file
   try {
     if (fs.existsSync(SIMULATION_DATA_FILE)) {
       const data = JSON.parse(fs.readFileSync(SIMULATION_DATA_FILE, 'utf-8'));
@@ -70,28 +92,47 @@ function loadSimState() {
         ...data,
         positions: new Map(Object.entries(data.positions || {}))
       };
-      console.log(`[SIM] Loaded state: $${simState.balance.toFixed(2)} balance, ${simState.stats.totalTrades} trades`);
+      console.log(`[SIM] Loaded from file: $${simState.balance.toFixed(2)} balance, ${simState.stats.totalTrades} trades`);
+
+      // Sync to MongoDB if available
+      if (mongo.isAvailable()) {
+        await mongo.saveSimulationState({
+          ...simState,
+          positions: Object.fromEntries(simState.positions)
+        });
+        console.log('[SIM] Synced file data to MongoDB');
+      }
     }
   } catch (err) {
     console.warn('[SIM] Could not load state:', err.message);
   }
 }
 
-// Save simulation state
-function saveSimState() {
+// Save simulation state - to both MongoDB and file
+async function saveSimState() {
+  const toSave = {
+    ...simState,
+    positions: Object.fromEntries(simState.positions)
+  };
+
+  // Save to MongoDB (primary)
+  if (mongo.isAvailable()) {
+    try {
+      await mongo.saveSimulationState(toSave);
+    } catch (err) {
+      console.warn('[SIM] MongoDB save failed:', err.message);
+    }
+  }
+
+  // Save to file (backup)
   try {
     const dir = path.dirname(SIMULATION_DATA_FILE);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-
-    const toSave = {
-      ...simState,
-      positions: Object.fromEntries(simState.positions)
-    };
     fs.writeFileSync(SIMULATION_DATA_FILE, JSON.stringify(toSave, null, 2));
   } catch (err) {
-    console.warn('[SIM] Could not save state:', err.message);
+    console.warn('[SIM] Could not save state to file:', err.message);
   }
 }
 
@@ -433,6 +474,15 @@ function closeSimPosition(symbol, reason, exitPrice, exitIndicators = null) {
         holdTime
       });
     }
+  }
+
+  // Record to MongoDB for historical analysis
+  if (mongo.isAvailable()) {
+    mongo.recordSimulationTrade({
+      ...closedTrade,
+      status: 'CLOSED',
+      direction
+    }).catch(() => {}); // Fire and forget
   }
 
   // Remove from positions

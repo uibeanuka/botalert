@@ -20,7 +20,12 @@
       "Bash(git commit -m \"$\\(cat <<''EOF''\nAdd iOS PWA support\n\n- Add apple-mobile-web-app-capable meta tag\n- Add apple-touch-icon for home screen\n- Add viewport and theme-color meta tags\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(git push)",
       "Bash(git commit:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "WebFetch(domain:backend-production-b092.up.railway.app)",
+      "WebFetch(domain:botalert-production.up.railway.app)",
+      "Bash(git fetch:*)",
+      "Bash(git stash:*)",
+      "Bash(git merge:*)"
     ]
   }
 }

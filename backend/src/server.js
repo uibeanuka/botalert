@@ -36,6 +36,9 @@ const { startScanner, getTopOpportunities, getSniperOpportunities, getScannerSta
 // Simulation Engine - paper trading for learning
 const { startSimulationEngine, getSimulationStatus, resetSimulation, processSignalsForSimulation, monitorSimPositions, SIM_ENABLED } = require('./simulationEngine');
 
+// MongoDB Storage for learning data
+const mongo = require('./mongoStorage');
+
 const PORT = Number(process.env.PORT || 5000);
 const POLL_MS = Number(process.env.POLL_MS || 15_000);
 // If SYMBOLS is "ALL" or empty, auto-discover all futures symbols
@@ -627,6 +630,76 @@ app.post('/api/simulation/reset', (_req, res) => {
   }
 });
 
+// === LEARNING INSIGHTS (MongoDB) ===
+app.get('/api/learning/insights', async (_req, res) => {
+  try {
+    const insights = await mongo.getAllInsights();
+    res.json(insights);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get learning insights', message: error.message });
+  }
+});
+
+app.get('/api/learning/trades', async (req, res) => {
+  try {
+    const limit = Number(req.query.limit) || 100;
+    const symbol = req.query.symbol?.toUpperCase();
+    const result = req.query.result;
+    const trades = await mongo.getTradeHistory({ symbol, result, limit });
+    res.json({ trades, count: trades.length });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get trade history', message: error.message });
+  }
+});
+
+app.get('/api/learning/stats', async (_req, res) => {
+  try {
+    const stats = await mongo.getTradeStats();
+    const symbolPerf = await mongo.getPerformanceBySymbol();
+    res.json({ stats, bySymbol: symbolPerf.slice(0, 20) });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get trade stats', message: error.message });
+  }
+});
+
+app.get('/api/learning/entry-conditions', async (_req, res) => {
+  try {
+    const rankings = await mongo.getEntryConditionRankings();
+    res.json(rankings);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get entry conditions', message: error.message });
+  }
+});
+
+app.get('/api/learning/failure-patterns', async (_req, res) => {
+  try {
+    const patterns = await mongo.getTopFailurePatterns(20);
+    res.json({ patterns, count: patterns.length });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get failure patterns', message: error.message });
+  }
+});
+
+app.get('/api/learning/simulation', async (_req, res) => {
+  try {
+    const stats = await mongo.getSimulationStats();
+    const trades = await mongo.getSimulationTrades({ limit: 50 });
+    res.json({ stats, recentTrades: trades });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get simulation data', message: error.message });
+  }
+});
+
+app.get('/api/learning/daily-stats', async (req, res) => {
+  try {
+    const days = Number(req.query.days) || 30;
+    const stats = await mongo.getDailyStatsHistory(days);
+    res.json({ stats, days: stats.length });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get daily stats', message: error.message });
+  }
+});
+
 // AI Learned Recommendation
 app.get('/api/ai/recommendation/:symbol', async (req, res) => {
   try {
@@ -989,9 +1062,24 @@ app.get('/api/intelligence/:symbol', async (req, res) => {
 
 // ============ END AI TRADING SYSTEM ENDPOINTS ============
 
-server.listen(PORT, () => {
-  console.log(`Backend listening on http://localhost:${PORT}`);
-});
+// Initialize MongoDB and start server
+(async () => {
+  // Connect to MongoDB for learning data storage
+  try {
+    await mongo.connect();
+    if (mongo.isAvailable()) {
+      console.log('[SERVER] MongoDB connected - learning data will be stored persistently');
+    } else {
+      console.log('[SERVER] MongoDB not available - using file storage fallback');
+    }
+  } catch (err) {
+    console.warn('[SERVER] MongoDB connection failed:', err.message);
+  }
+
+  server.listen(PORT, () => {
+    console.log(`Backend listening on http://localhost:${PORT}`);
+  });
+})();
 
 async function pollSymbol(symbol, interval) {
   try {
