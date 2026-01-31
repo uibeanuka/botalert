@@ -14,6 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const { extractEntryConditions, updateEntryConditionPerformance, analyzeTradeFailure, learnFromTrade, checkEntryQuality } = require('./aiLearning');
 const mongo = require('./mongoStorage');
+const { analyzeCompletedTrade, getRecommendedStyle } = require('./tradeAnalyzer');
 
 const SIMULATION_DATA_FILE = path.join(__dirname, '../data/simulation_state.json');
 
@@ -473,6 +474,32 @@ function closeSimPosition(symbol, reason, exitPrice, exitIndicators = null) {
         exitIndicators,
         holdTime
       });
+    }
+
+    // === DEEP TRADE ANALYSIS - Understand WHY ===
+    try {
+      const deepAnalysis = analyzeCompletedTrade({
+        symbol,
+        direction,
+        entryPrice: position.entryPrice,
+        exitPrice,
+        pnlPercent,
+        result,
+        holdTime,
+        entryIndicators: position.indicators,
+        exitIndicators,
+        peakPnlPercent: position.peakPnlPercent || 0,
+        entryConditions: position.entryConditions,
+        signal: position.signal,
+        closeReason: reason
+      });
+
+      if (deepAnalysis.rootCauses.length > 0) {
+        const emoji = result === 'win' ? '🎯' : '💡';
+        console.log(`[SIM] ${emoji} Analysis: ${deepAnalysis.rootCauses.map(c => c.reason).join(', ')} | Style: ${deepAnalysis.style} | Should use: ${deepAnalysis.shouldHaveUsedStyle}`);
+      }
+    } catch (e) {
+      // Analysis error - continue
     }
   }
 

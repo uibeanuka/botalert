@@ -4,6 +4,7 @@ const { recordPattern, getStats: getPatternStats } = require('./patternMemory');
 const { learnFromTrade, learnFromLiquidation, learnFromSevereLoss, isDangerousCondition, analyzeTradeFailure, checkFailurePatternRisk, extractEntryConditions, updateEntryConditionPerformance, checkEntryQuality } = require('./aiLearning');
 const { recordTrade: recordRiskTrade, checkTradingAllowed, calculatePositionSize: riskCalcPositionSize } = require('./riskManager');
 const { addTrainingSample } = require('./mlSignalGenerator');
+const { analyzeCompletedTrade, getRecommendedStyle } = require('./tradeAnalyzer');
 
 const API_BASE = process.env.BINANCE_API_URL || 'https://fapi.binance.com';
 const API_KEY = process.env.BINANCE_API_KEY || '';
@@ -656,6 +657,37 @@ async function closePosition(symbol, reason = 'manual', currentPrice = null, exi
         updateEntryConditionPerformance(position.entryConditions, result, pnlPercent);
         const winLoss = result === 'win' || pnlPercent > 0 ? '✅ WIN' : '❌ LOSS';
         console.log(`📈 [LEARN] ${symbol} ${winLoss}: Updated ${position.entryConditions.length} entry conditions (${position.entryConditions.slice(0, 3).join(', ')}...)`);
+      }
+
+      // === DEEP TRADE ANALYSIS - Understand WHY ===
+      // Analyze root cause of win/loss, exit timing, optimal style
+      try {
+        const deepAnalysis = analyzeCompletedTrade({
+          symbol,
+          direction: position.side?.toLowerCase(),
+          entryPrice: position.entryPrice,
+          exitPrice: currentPrice,
+          pnlPercent,
+          result,
+          holdTime: Date.now() - position.openTime,
+          entryIndicators: position.signal?.indicators,
+          exitIndicators,
+          peakPnlPercent: position.peakProfit || 0,
+          troughPnlPercent: position.troughLoss || 0,
+          entryConditions: position.entryConditions,
+          signal: position.signal?.signal,
+          closeReason: reason
+        });
+
+        if (deepAnalysis.rootCauses.length > 0) {
+          const emoji = result === 'win' || pnlPercent > 0 ? '🎯' : '💡';
+          console.log(`${emoji} [ANALYSIS] ${symbol}: ${deepAnalysis.rootCauses.map(c => c.reason).join(', ')} | Style: ${deepAnalysis.style} | Exit: ${deepAnalysis.exitQuality}`);
+          if (deepAnalysis.lessonsLearned.length > 0) {
+            console.log(`   📚 Lesson: ${deepAnalysis.lessonsLearned[0].message}`);
+          }
+        }
+      } catch (e) {
+        console.warn('[TRADING] Deep analysis error:', e.message);
       }
     } catch (e) {
       // AI learning might not be loaded

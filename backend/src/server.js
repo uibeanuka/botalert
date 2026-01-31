@@ -39,6 +39,9 @@ const { startSimulationEngine, getSimulationStatus, resetSimulation, processSign
 // MongoDB Storage for learning data
 const mongo = require('./mongoStorage');
 
+// Deep Trade Analyzer - WHY trades succeed/fail
+const { getAnalysisStats, getLearningInsights, getRecommendedStyle } = require('./tradeAnalyzer');
+
 const PORT = Number(process.env.PORT || 5000);
 const POLL_MS = Number(process.env.POLL_MS || 15_000);
 // If SYMBOLS is "ALL" or empty, auto-discover all futures symbols
@@ -697,6 +700,57 @@ app.get('/api/learning/daily-stats', async (req, res) => {
     res.json({ stats, days: stats.length });
   } catch (error) {
     res.status(500).json({ error: 'Failed to get daily stats', message: error.message });
+  }
+});
+
+// === DEEP TRADE ANALYSIS - WHY trades succeed/fail ===
+app.get('/api/analysis/stats', (_req, res) => {
+  try {
+    const stats = getAnalysisStats();
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get analysis stats', message: error.message });
+  }
+});
+
+app.get('/api/analysis/insights', (_req, res) => {
+  try {
+    const insights = getLearningInsights();
+    res.json({ insights, count: insights.length });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get analysis insights', message: error.message });
+  }
+});
+
+app.get('/api/analysis/style/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const interval = (req.query.interval || '15m').toString();
+    const key = buildKey(symbol, interval);
+
+    let candles = latestCandles.get(key);
+    if (!candles || candles.length < 50) {
+      candles = await getCandles(symbol, interval, 200);
+    }
+
+    const indicators = calculateIndicators(candles);
+    const recommendation = getRecommendedStyle(symbol, indicators);
+
+    res.json({
+      symbol,
+      interval,
+      recommendation,
+      currentConditions: {
+        trend: indicators.trend?.direction,
+        rsi: indicators.rsi,
+        atrPercent: indicators.atr && indicators.currentPrice
+          ? ((indicators.atr / indicators.currentPrice) * 100).toFixed(2)
+          : null,
+        volumeRatio: indicators.volumeRatio
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get style recommendation', message: error.message });
   }
 });
 
