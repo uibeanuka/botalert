@@ -40,7 +40,7 @@ const { startSimulationEngine, getSimulationStatus, resetSimulation, processSign
 const mongo = require('./mongoStorage');
 
 // Deep Trade Analyzer - WHY trades succeed/fail
-const { getAnalysisStats, getLearningInsights, getRecommendedStyle } = require('./tradeAnalyzer');
+const { getAnalysisStats, getLearningInsights: getTradeAnalysisInsights, getRecommendedStyle } = require('./tradeAnalyzer');
 
 const PORT = Number(process.env.PORT || 5000);
 const POLL_MS = Number(process.env.POLL_MS || 15_000);
@@ -715,7 +715,7 @@ app.get('/api/analysis/stats', (_req, res) => {
 
 app.get('/api/analysis/insights', (_req, res) => {
   try {
-    const insights = getLearningInsights();
+    const insights = getTradeAnalysisInsights();
     res.json({ insights, count: insights.length });
   } catch (error) {
     res.status(500).json({ error: 'Failed to get analysis insights', message: error.message });
