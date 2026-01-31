@@ -33,6 +33,9 @@ const { getPendingConfirmations, cleanupExpired: cleanupSniperExpired } = requir
 // Coin Scanner - scans ALL futures for sniper opportunities
 const { startScanner, getTopOpportunities, getSniperOpportunities, getScannerStatus, getScanResult } = require('./coinScanner');
 
+// Simulation Engine - paper trading for learning
+const { startSimulationEngine, getSimulationStatus, resetSimulation, processSignalsForSimulation, monitorSimPositions, SIM_ENABLED } = require('./simulationEngine');
+
 const PORT = Number(process.env.PORT || 5000);
 const POLL_MS = Number(process.env.POLL_MS || 15_000);
 // If SYMBOLS is "ALL" or empty, auto-discover all futures symbols
@@ -602,6 +605,25 @@ app.get('/api/scanner/coin/:symbol', (req, res) => {
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: 'Failed to get coin scan result', message: error.message });
+  }
+});
+
+// === SIMULATION / PAPER TRADING ===
+app.get('/api/simulation/status', (_req, res) => {
+  try {
+    const status = getSimulationStatus();
+    res.json(status);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get simulation status', message: error.message });
+  }
+});
+
+app.post('/api/simulation/reset', (_req, res) => {
+  try {
+    const status = resetSimulation();
+    res.json({ success: true, message: 'Simulation reset', status });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to reset simulation', message: error.message });
   }
 });
 
@@ -1440,5 +1462,41 @@ function schedulePolling() {
       }
     }, 3000); // Every 3 seconds
     pollers.push(fastMonitorId);
+  }
+
+  // === SIMULATION ENGINE - Paper trading for learning ===
+  if (SIM_ENABLED) {
+    const simEngine = startSimulationEngine({ latestSignals });
+
+    if (simEngine) {
+      // Process signals for simulation every 30 seconds
+      const simProcessId = setInterval(() => {
+        try {
+          const opened = simEngine.processSignals(latestSignals);
+          if (opened > 0) {
+            console.log(`[SIM] Opened ${opened} new simulated positions`);
+          }
+        } catch (err) {
+          console.error('[SIM] Processing error:', err.message);
+        }
+      }, 30000);
+      pollers.push(simProcessId);
+
+      // Monitor simulated positions every 15 seconds
+      const simMonitorId = setInterval(() => {
+        try {
+          const closed = simEngine.monitorPositions(latestSignals);
+          if (closed && closed.length > 0) {
+            // Emit simulation results for dashboard
+            io.emit('simulation', { type: 'TRADES_CLOSED', trades: closed });
+          }
+        } catch (err) {
+          console.error('[SIM] Monitoring error:', err.message);
+        }
+      }, 15000);
+      pollers.push(simMonitorId);
+
+      console.log('[SIM] Simulation engine started - learning from paper trades');
+    }
   }
 }
