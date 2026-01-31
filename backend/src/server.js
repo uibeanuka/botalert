@@ -8,7 +8,7 @@ const { getCandles, getUsdtPerpetualMarkets, getTopGainers, getVolumeSurgers } =
 const { calculateIndicators } = require('./indicators');
 const { predictNextMove, setFundingRates } = require('./ai');
 const { buildDcaPlan, DEFAULT_DCA_SYMBOLS } = require('./dcaPlanner');
-const { executeTrade, closePosition, monitorAllPositions, getStatus: getTradingStatus, updateSettings, TRADING_ENABLED, MIN_CONFIDENCE } = require('./trading');
+const { executeTrade, closePosition, monitorAllPositions, getOpenPositions, getStatus: getTradingStatus, updateSettings, TRADING_ENABLED, MIN_CONFIDENCE } = require('./trading');
 const { handleChatMessage } = require('./chatHandler');
 const { getStats: getPatternStats, recordMissedOpportunity } = require('./patternMemory');
 const { startSpotDcaEngine, getSpotDcaStatus, getSpotBalances, getFreeBalance } = require('./spotDcaEngine');
@@ -1366,16 +1366,17 @@ function schedulePolling() {
   // First update after 10 seconds
   setTimeout(updateFundingForAI, 10 * 1000);
 
-  // Monitor open positions every 30 seconds for smart exits
+  // Monitor open positions every 10 seconds for smart exits (was 30s - too slow for volatile moves)
   if (TRADING_ENABLED) {
     const monitorId = setInterval(async () => {
       try {
         const results = await monitorAllPositions(latestSignals);
         for (const result of results) {
           if (result.closed) {
-            io.emit('trade', { type: 'SMART_EXIT', symbol: result.symbol, reason: result.reason });
+            const exitType = result.emergency ? 'EMERGENCY_EXIT' : 'SMART_EXIT';
+            io.emit('trade', { type: exitType, symbol: result.symbol, reason: result.reason });
             sendPushNotification(
-              `SMART EXIT: ${result.symbol}`,
+              `${exitType}: ${result.symbol}`,
               result.reason
             );
           }
@@ -1383,7 +1384,61 @@ function schedulePolling() {
       } catch (err) {
         console.error('Position monitoring error:', err.message);
       }
-    }, 30000);
+    }, 10000); // Every 10 seconds (was 30)
     pollers.push(monitorId);
+
+    // FAST MONITOR - Check positions every 3 seconds for emergency conditions only
+    // This catches rapid price moves that could lead to liquidation
+    const fastMonitorId = setInterval(async () => {
+      try {
+        const positions = await getOpenPositions();
+        for (const pos of positions) {
+          const symbol = pos.symbol;
+          const entryPrice = Number(pos.entryPrice);
+          const markPrice = Number(pos.markPrice);
+          const liqPrice = Number(pos.liquidationPrice);
+          const unrealizedPnl = Number(pos.unRealizedProfit);
+          const positionAmt = Number(pos.positionAmt);
+
+          if (positionAmt === 0) continue;
+
+          const isLong = positionAmt > 0;
+          const pnlPct = isLong
+            ? ((markPrice - entryPrice) / entryPrice) * 100
+            : ((entryPrice - markPrice) / entryPrice) * 100;
+
+          // Calculate distance to liquidation
+          const distToLiq = isLong
+            ? ((markPrice - liqPrice) / markPrice) * 100
+            : ((liqPrice - markPrice) / markPrice) * 100;
+
+          // Emergency close if:
+          // 1. Loss exceeds 8%
+          // 2. Within 25% of liquidation
+          if (pnlPct <= -8 || distToLiq <= 25) {
+            console.log(`🚨🚨 FAST MONITOR EMERGENCY: ${symbol} PnL: ${pnlPct.toFixed(1)}%, Dist to liq: ${distToLiq.toFixed(1)}%`);
+
+            // Try to close immediately
+            try {
+              await closePosition(symbol, `FAST EMERGENCY: PnL ${pnlPct.toFixed(1)}%, Liq dist ${distToLiq.toFixed(1)}%`, markPrice);
+              io.emit('trade', {
+                type: 'EMERGENCY_EXIT',
+                symbol,
+                reason: `FAST EMERGENCY: PnL ${pnlPct.toFixed(1)}%, Liquidation distance ${distToLiq.toFixed(1)}%`
+              });
+              sendPushNotification(
+                `🚨 EMERGENCY EXIT: ${symbol}`,
+                `Closed at ${pnlPct.toFixed(1)}% loss - ${distToLiq.toFixed(1)}% from liquidation`
+              );
+            } catch (closeErr) {
+              console.error(`Failed to emergency close ${symbol}:`, closeErr.message);
+            }
+          }
+        }
+      } catch (err) {
+        // Silent fail on fast monitor
+      }
+    }, 3000); // Every 3 seconds
+    pollers.push(fastMonitorId);
   }
 }

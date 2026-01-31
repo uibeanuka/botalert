@@ -405,6 +405,14 @@ async function executeTrade(signal) {
       console.warn(`WARNING: TP placement failed for ${signal.symbol}. Position protected by SL only.`);
     }
 
+    // Estimate liquidation price (simplified - actual depends on margin mode)
+    // For isolated margin: liq = entry * (1 - 1/leverage) for LONG, entry * (1 + 1/leverage) for SHORT
+    const leverage = runtimeSettings.leverage || 10;
+    const liqDistance = 1 / leverage;
+    const liquidationPrice = trade.type === 'LONG'
+      ? trade.entry * (1 - liqDistance * 0.9) // 90% of theoretical (buffer for fees)
+      : trade.entry * (1 + liqDistance * 0.9);
+
     // Track position
     openPositions.set(signal.symbol, {
       symbol: signal.symbol,
@@ -413,12 +421,14 @@ async function executeTrade(signal) {
       entryPrice: trade.entry,
       stopLoss,
       takeProfit,
+      liquidationPrice,
       entryOrderId: entryOrder.orderId,
       slOrderId: slOrder?.orderId || null,
       tpOrderId: tpOrder?.orderId || null,
       hasTP: !!tpOrder,
       hasSL: !!slOrder,
       openTime: Date.now(),
+      peakProfit: 0,
       signal
     });
 
@@ -567,21 +577,95 @@ async function closePosition(symbol, reason = 'manual', currentPrice = null) {
   }
 }
 
+// Emergency stop loss settings
+const EMERGENCY_STOP_LOSS_PCT = Number(process.env.EMERGENCY_STOP_LOSS_PCT || 8); // -8% hard stop
+const TRAILING_STOP_PCT = Number(process.env.TRAILING_STOP_PCT || 3); // 3% trailing from peak
+const LIQUIDATION_WARNING_PCT = 50; // Warn if within 50% of liquidation
+
 // Smart exit monitoring - checks if open positions should be closed early
 async function monitorPosition(symbol, currentSignal) {
   const position = openPositions.get(symbol);
   if (!position) return null;
 
-  const ai = currentSignal?.ai;
-  if (!ai) return null;
-
+  const currentPrice = currentSignal?.indicators?.currentPrice;
   const positionSide = position.side; // 'LONG' or 'SHORT'
-  const signalDirection = ai.direction; // 'long', 'short', or 'neutral'
-  const confidence = ai.confidence || 0;
-  const scores = ai.scores || {};
 
   let shouldClose = false;
   let closeReason = '';
+
+  // === EMERGENCY CHECKS FIRST (before any signal analysis) ===
+
+  // 1. EMERGENCY HARD STOP - Never let loss exceed this %
+  if (currentPrice && position.entryPrice) {
+    const pnlPct = positionSide === 'LONG'
+      ? ((currentPrice - position.entryPrice) / position.entryPrice) * 100
+      : ((position.entryPrice - currentPrice) / position.entryPrice) * 100;
+
+    // Track peak profit for trailing stop
+    if (!position.peakProfit) position.peakProfit = 0;
+    if (pnlPct > position.peakProfit) {
+      position.peakProfit = pnlPct;
+    }
+
+    // EMERGENCY STOP - Hard loss limit
+    if (pnlPct <= -EMERGENCY_STOP_LOSS_PCT) {
+      console.log(`🚨 EMERGENCY STOP: ${symbol} at ${pnlPct.toFixed(2)}% loss (limit: -${EMERGENCY_STOP_LOSS_PCT}%)`);
+      shouldClose = true;
+      closeReason = `EMERGENCY STOP: ${pnlPct.toFixed(1)}% loss exceeded -${EMERGENCY_STOP_LOSS_PCT}% limit`;
+    }
+
+    // TRAILING STOP - Lock in profits
+    if (!shouldClose && position.peakProfit >= 2) { // Only activate after 2% profit
+      const drawdownFromPeak = position.peakProfit - pnlPct;
+      if (drawdownFromPeak >= TRAILING_STOP_PCT) {
+        console.log(`📉 TRAILING STOP: ${symbol} dropped ${drawdownFromPeak.toFixed(1)}% from peak (${position.peakProfit.toFixed(1)}% -> ${pnlPct.toFixed(1)}%)`);
+        shouldClose = true;
+        closeReason = `TRAILING STOP: Dropped ${drawdownFromPeak.toFixed(1)}% from ${position.peakProfit.toFixed(1)}% peak`;
+      }
+    }
+
+    // LIQUIDATION PROXIMITY WARNING
+    if (!shouldClose && position.liquidationPrice) {
+      const distanceToLiq = positionSide === 'LONG'
+        ? ((currentPrice - position.liquidationPrice) / currentPrice) * 100
+        : ((position.liquidationPrice - currentPrice) / currentPrice) * 100;
+
+      if (distanceToLiq <= LIQUIDATION_WARNING_PCT / 2) {
+        console.log(`⚠️ LIQUIDATION DANGER: ${symbol} only ${distanceToLiq.toFixed(1)}% from liquidation!`);
+        shouldClose = true;
+        closeReason = `LIQUIDATION DANGER: Only ${distanceToLiq.toFixed(1)}% from liquidation price`;
+      }
+    }
+  }
+
+  // 2. VOLUME SPIKE EXIT - Large incoming volume against position
+  if (!shouldClose && currentSignal?.indicators?.sniperSignals?.volumeSurge) {
+    const surge = currentSignal.indicators.sniperSignals.volumeSurge;
+    if (surge.detected && surge.isExplosive) {
+      // Check if surge direction is against position
+      const priceDirection = currentSignal.indicators.priceChange > 0 ? 'up' : 'down';
+      if ((positionSide === 'LONG' && priceDirection === 'down' && surge.strength > 70) ||
+          (positionSide === 'SHORT' && priceDirection === 'up' && surge.strength > 70)) {
+        console.log(`💥 VOLUME SPIKE EXIT: ${symbol} explosive volume against position`);
+        shouldClose = true;
+        closeReason = `VOLUME SPIKE: Explosive ${surge.strength}% volume surge against position`;
+      }
+    }
+  }
+
+  if (shouldClose) {
+    console.log(`EMERGENCY EXIT: Closing ${symbol} - ${closeReason}`);
+    const result = await closePosition(symbol, closeReason, currentPrice);
+    return { closed: true, symbol, reason: closeReason, emergency: true };
+  }
+
+  // === NORMAL SIGNAL-BASED CHECKS ===
+  const ai = currentSignal?.ai;
+  if (!ai) return null;
+
+  const signalDirection = ai.direction; // 'long', 'short', or 'neutral'
+  const confidence = ai.confidence || 0;
+  const scores = ai.scores || {};
 
   // 1. Signal reversal - most important
   if (positionSide === 'LONG' && signalDirection === 'short' && confidence >= 0.6) {
