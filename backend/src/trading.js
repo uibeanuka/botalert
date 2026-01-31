@@ -5,6 +5,8 @@ const { learnFromTrade, learnFromLiquidation, learnFromSevereLoss, isDangerousCo
 const { recordTrade: recordRiskTrade, checkTradingAllowed, calculatePositionSize: riskCalcPositionSize } = require('./riskManager');
 const { addTrainingSample } = require('./mlSignalGenerator');
 const { analyzeCompletedTrade, getRecommendedStyle } = require('./tradeAnalyzer');
+const { getSymbolSentiment, fetchFearGreedIndex } = require('./sentimentEngine');
+const { getEventTradingAdjustment, checkUpcomingEvents } = require('./economicCalendar');
 
 const API_BASE = process.env.BINANCE_API_URL || 'https://fapi.binance.com';
 const API_KEY = process.env.BINANCE_API_KEY || '';
@@ -17,6 +19,11 @@ const MIN_CONFIDENCE = Number(process.env.MIN_CONFIDENCE || 65) / 100; // 65% de
 const MAX_OPEN_POSITIONS = Number(process.env.MAX_OPEN_POSITIONS || 5);
 const MAX_DAILY_TRADES = Number(process.env.MAX_DAILY_TRADES || 20);
 const LEVERAGE = Number(process.env.LEVERAGE || 10);
+
+// Sentiment integration
+const SENTIMENT_ENABLED = process.env.SENTIMENT_TRADING_ENABLED !== 'false'; // Default enabled
+const SENTIMENT_WEIGHT = Number(process.env.SENTIMENT_WEIGHT || 20) / 100; // 20% weight in decision
+const BLOCK_EXTREME_SENTIMENT = process.env.BLOCK_EXTREME_SENTIMENT === 'true'; // Block trades in extreme fear/greed
 
 // Mutable runtime settings (can be changed via chat)
 const runtimeSettings = {
@@ -50,6 +57,136 @@ function updateSettings(updates) {
 const openPositions = new Map(); // symbol -> position info
 const dailyTrades = { count: 0, date: new Date().toDateString() };
 const tradeHistory = [];
+
+// Cached sentiment to avoid excessive API calls
+let cachedSentiment = { data: null, expiry: 0 };
+
+/**
+ * Evaluate sentiment impact on trade decision
+ * @param {string} symbol - Trading symbol
+ * @param {string} direction - 'long' or 'short'
+ * @returns {Promise<{allowed: boolean, adjustment: number, reason: string, sentiment: object}>}
+ */
+async function evaluateSentiment(symbol, direction) {
+  if (!SENTIMENT_ENABLED) {
+    return { allowed: true, adjustment: 0, reason: 'Sentiment checks disabled', sentiment: null };
+  }
+
+  try {
+    // Check cache first (valid for 2 minutes)
+    let sentiment;
+    if (cachedSentiment.data && Date.now() < cachedSentiment.expiry) {
+      sentiment = cachedSentiment.data;
+    } else {
+      sentiment = await getSymbolSentiment(symbol);
+      cachedSentiment = { data: sentiment, expiry: Date.now() + 120000 };
+    }
+
+    const fearGreed = sentiment.fearGreed;
+    const combined = sentiment.combined;
+    const news = sentiment.news;
+
+    // === BLOCK CONDITIONS ===
+
+    // 1. Extreme fear/greed blocking (if enabled)
+    if (BLOCK_EXTREME_SENTIMENT) {
+      if (fearGreed.value <= 10) {
+        return {
+          allowed: false,
+          adjustment: 0,
+          reason: `🔴 EXTREME FEAR (${fearGreed.value}) - market panic, no new trades`,
+          sentiment
+        };
+      }
+      if (fearGreed.value >= 90) {
+        return {
+          allowed: false,
+          adjustment: 0,
+          reason: `🔴 EXTREME GREED (${fearGreed.value}) - market euphoria, crash imminent`,
+          sentiment
+        };
+      }
+    }
+
+    // 2. Strong news against trade direction
+    if (news.count >= 3) {
+      const newsScore = news.score || 0;
+      if (direction === 'long' && newsScore < -0.5) {
+        return {
+          allowed: false,
+          adjustment: 0,
+          reason: `📰 Strong bearish news flow (${(newsScore * 100).toFixed(0)}%) conflicts with long`,
+          sentiment
+        };
+      }
+      if (direction === 'short' && newsScore > 0.5) {
+        return {
+          allowed: false,
+          adjustment: 0,
+          reason: `📰 Strong bullish news flow (${(newsScore * 100).toFixed(0)}%) conflicts with short`,
+          sentiment
+        };
+      }
+    }
+
+    // === CONFIDENCE ADJUSTMENTS ===
+    let adjustment = 0;
+    const reasons = [];
+
+    // Fear & Greed alignment
+    if (direction === 'long') {
+      if (fearGreed.value <= 25) {
+        adjustment += 0.08; // Extreme fear = contrarian buy opportunity
+        reasons.push(`Extreme fear (${fearGreed.value}) favors long`);
+      } else if (fearGreed.value >= 70) {
+        adjustment -= 0.05; // Greed = caution on longs
+        reasons.push(`High greed (${fearGreed.value}) cautions long`);
+      }
+    } else {
+      if (fearGreed.value >= 75) {
+        adjustment += 0.08; // Extreme greed = contrarian short opportunity
+        reasons.push(`Extreme greed (${fearGreed.value}) favors short`);
+      } else if (fearGreed.value <= 30) {
+        adjustment -= 0.05; // Fear = caution on shorts
+        reasons.push(`Fear (${fearGreed.value}) cautions short`);
+      }
+    }
+
+    // News sentiment alignment
+    const newsScore = news.score || 0;
+    if (direction === 'long' && newsScore > 0.3) {
+      adjustment += 0.05;
+      reasons.push('News supports bullish bias');
+    } else if (direction === 'short' && newsScore < -0.3) {
+      adjustment += 0.05;
+      reasons.push('News supports bearish bias');
+    }
+
+    // Combined sentiment score alignment
+    const combinedScore = combined.score || 0;
+    if ((direction === 'long' && combinedScore > 0.2) || (direction === 'short' && combinedScore < -0.2)) {
+      adjustment += 0.03;
+      reasons.push('Overall sentiment aligned');
+    } else if ((direction === 'long' && combinedScore < -0.3) || (direction === 'short' && combinedScore > 0.3)) {
+      adjustment -= 0.05;
+      reasons.push('Overall sentiment conflicts');
+    }
+
+    // Apply weight
+    adjustment = adjustment * SENTIMENT_WEIGHT;
+
+    return {
+      allowed: true,
+      adjustment: Math.round(adjustment * 100) / 100,
+      reason: reasons.length > 0 ? reasons.join('; ') : 'Neutral sentiment',
+      sentiment
+    };
+
+  } catch (err) {
+    console.warn('[SENTIMENT] Evaluation failed:', err.message);
+    return { allowed: true, adjustment: 0, reason: 'Sentiment check failed', sentiment: null };
+  }
+}
 
 function sign(queryString) {
   return crypto.createHmac('sha256', API_SECRET).update(queryString).digest('hex');
@@ -359,6 +496,52 @@ async function executeTrade(signal) {
     console.log(`✨ [LEARN] EXCELLENT ${signal.symbol}: ${entryQuality.reason} - threshold lowered to ${(effectiveThreshold * 100).toFixed(0)}%`);
   }
 
+  // === SENTIMENT CHECK ===
+  // Evaluate market sentiment and news before entering
+  const sentimentResult = await evaluateSentiment(signal.symbol, direction);
+
+  if (!sentimentResult.allowed) {
+    console.log(`🛑 [SENTIMENT] BLOCKED ${signal.symbol} ${direction.toUpperCase()}: ${sentimentResult.reason}`);
+    return {
+      executed: false,
+      reason: sentimentResult.reason,
+      sentiment: {
+        fearGreed: sentimentResult.sentiment?.fearGreed?.value,
+        news: sentimentResult.sentiment?.news?.sentiment,
+        combined: sentimentResult.sentiment?.combined?.classification
+      }
+    };
+  }
+
+  // Apply sentiment adjustment to confidence
+  if (sentimentResult.adjustment !== 0) {
+    const adjustedConfidence = confidence + sentimentResult.adjustment;
+    if (sentimentResult.adjustment > 0) {
+      console.log(`📈 [SENTIMENT] ${signal.symbol}: Confidence boosted ${(sentimentResult.adjustment * 100).toFixed(0)}% → ${(adjustedConfidence * 100).toFixed(0)}% (${sentimentResult.reason})`);
+    } else {
+      console.log(`📉 [SENTIMENT] ${signal.symbol}: Confidence reduced ${(sentimentResult.adjustment * 100).toFixed(0)}% → ${(adjustedConfidence * 100).toFixed(0)}% (${sentimentResult.reason})`);
+      // If sentiment significantly reduces confidence below threshold, block
+      if (adjustedConfidence < effectiveThreshold) {
+        return {
+          executed: false,
+          reason: `Sentiment reduced confidence to ${(adjustedConfidence * 100).toFixed(0)}%, below ${(effectiveThreshold * 100).toFixed(0)}% threshold`,
+          sentiment: {
+            fearGreed: sentimentResult.sentiment?.fearGreed?.value,
+            adjustment: sentimentResult.adjustment,
+            reason: sentimentResult.reason
+          }
+        };
+      }
+    }
+  }
+
+  // === ECONOMIC CALENDAR CHECK ===
+  // Reduce exposure during high-impact macro events (FOMC, CPI, NFP)
+  const calendarAdjustment = getEventTradingAdjustment();
+  if (calendarAdjustment.warnings.length > 0) {
+    console.log(`📅 [CALENDAR] ${signal.symbol}: ${calendarAdjustment.warnings.join(', ')}`);
+  }
+
   // Check daily trade limit
   const today = new Date().toDateString();
   if (dailyTrades.date !== today) {
@@ -396,7 +579,15 @@ async function executeTrade(signal) {
   }
 
   // Calculate position size based on risk
-  const riskAmount = balance * runtimeSettings.riskPerTrade;
+  let riskAmount = balance * runtimeSettings.riskPerTrade;
+
+  // Apply calendar adjustment (reduce size during high-impact events)
+  if (calendarAdjustment.positionSizeMultiplier < 1) {
+    const originalRisk = riskAmount;
+    riskAmount = riskAmount * calendarAdjustment.positionSizeMultiplier;
+    console.log(`📅 [CALENDAR] ${signal.symbol}: Position size reduced ${((1 - calendarAdjustment.positionSizeMultiplier) * 100).toFixed(0)}% ($${originalRisk.toFixed(2)} → $${riskAmount.toFixed(2)})`);
+  }
+
   const riskPerUnit = Math.abs(trade.entry - trade.stopLoss);
   let quantity = riskAmount / riskPerUnit;
 
@@ -1037,6 +1228,8 @@ module.exports = {
   getOpenPositions,
   getStatus,
   updateSettings,
+  evaluateSentiment,
   TRADING_ENABLED,
-  MIN_CONFIDENCE
+  MIN_CONFIDENCE,
+  SENTIMENT_ENABLED
 };

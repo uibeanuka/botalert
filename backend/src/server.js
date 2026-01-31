@@ -25,6 +25,8 @@ const { learnFromTrade, getLearningInsights, getLearnedRecommendation, getOptima
 const { fetchFearGreedIndex, fetchCryptoNews, getSymbolSentiment, getMarketSentiment } = require('./sentimentEngine');
 const { fetchWhaleAlerts, getSymbolWhaleActivity } = require('./whaleAlerts');
 const { fetchFundingRates, getSymbolFunding, getLeverageAnalysis, fetchLongShortRatio } = require('./fundingRates');
+const { getCalendarStatus, checkUpcomingEvents, getEventTradingAdjustment } = require('./economicCalendar');
+const { trackNewsEvent, updatePendingNewsPrices, getNewsLearningStatus } = require('./newsImpactLearning');
 
 // Historical Learning & Sniper Confirmation
 const { runHistoricalAnalysis, getHistoricalContext } = require('./historicalLearning');
@@ -1030,6 +1032,37 @@ app.get('/api/sentiment', async (_req, res) => {
     res.json(data);
   } catch (error) {
     res.status(500).json({ error: 'Market sentiment failed', message: error.message });
+  }
+});
+
+// Economic Calendar (FOMC, CPI, NFP events)
+app.get('/api/calendar', (_req, res) => {
+  try {
+    const status = getCalendarStatus();
+    res.json(status);
+  } catch (error) {
+    res.status(500).json({ error: 'Calendar failed', message: error.message });
+  }
+});
+
+app.get('/api/calendar/upcoming', (req, res) => {
+  try {
+    const hours = Number(req.query.hours || 48);
+    const events = checkUpcomingEvents(hours);
+    const adjustment = getEventTradingAdjustment();
+    res.json({ ...events, tradingAdjustment: adjustment });
+  } catch (error) {
+    res.status(500).json({ error: 'Calendar lookup failed', message: error.message });
+  }
+});
+
+// News Impact Learning
+app.get('/api/news/learning', (_req, res) => {
+  try {
+    const status = getNewsLearningStatus();
+    res.json(status);
+  } catch (error) {
+    res.status(500).json({ error: 'News learning status failed', message: error.message });
   }
 });
 
