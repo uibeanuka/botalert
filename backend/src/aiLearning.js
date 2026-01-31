@@ -73,10 +73,44 @@ let learningState = {
   discountFactor: 0.95,
   explorationRate: 0.1,
 
+  // CRITICAL: Liquidation and severe loss tracking
+  liquidations: [],
+  severeLosses: [], // Losses > 5%
+  dangerousConditions: {}, // Conditions that led to liquidation/severe loss
+
+  // Entry condition tracking (what conditions led to bad entries)
+  badEntryConditions: {
+    highFunding: { count: 0, losses: 0 },
+    lowVolume: { count: 0, losses: 0 },
+    againstTrend: { count: 0, losses: 0 },
+    overboughtEntry: { count: 0, losses: 0 },
+    oversoldEntry: { count: 0, losses: 0 },
+    noSniperConfirm: { count: 0, losses: 0 }
+  },
+
+  // SPECIFIC FAILURE PATTERNS - Learn from exact mistakes
+  failurePatterns: {
+    fakeout: { count: 0, symbols: [], description: 'Entered on breakout that immediately reversed' },
+    resistanceReject: { count: 0, symbols: [], description: 'Bought into resistance, got rejected' },
+    supportReject: { count: 0, symbols: [], description: 'Shorted into support, got bounced' },
+    lateTrend: { count: 0, symbols: [], description: 'Entered too late in move, trend exhausted' },
+    volumeTrap: { count: 0, symbols: [], description: 'High volume entry but was distribution/accumulation against position' },
+    rangeBreakFail: { count: 0, symbols: [], description: 'Range breakout failed, price returned to range' },
+    divergenceIgnored: { count: 0, symbols: [], description: 'Entered despite bearish/bullish divergence warning' },
+    newsReversal: { count: 0, symbols: [], description: 'News event caused sudden reversal' },
+    liquidationHunt: { count: 0, symbols: [], description: 'Stop hunted before reversal (liquidity grab)' },
+    overleveraged: { count: 0, symbols: [], description: 'Extreme funding indicated overleveraged market' }
+  },
+
+  // Pattern sequence tracking - what happened before and after entry
+  tradeSequences: [], // Stores last 100 trade sequences for pattern analysis
+
   // Statistics
   totalLearnings: 0,
+  totalLiquidations: 0,
+  worstLoss: 0,
   lastUpdate: null,
-  version: 1
+  version: 2
 };
 
 // Load learning data on startup
@@ -298,13 +332,424 @@ function calculateReward(pnlPercent, result) {
   // Bonus for big wins
   if (pnlPercent > 5) reward *= 1.5;
 
-  // Extra penalty for big losses
-  if (pnlPercent < -5) reward *= 1.5;
+  // SEVERE penalty for big losses (exponential punishment)
+  if (pnlPercent < -5) reward *= 2.0;
+  if (pnlPercent < -10) reward *= 3.0;
+  if (pnlPercent < -20) reward *= 5.0; // Liquidation territory
 
   // Small penalty for hold when should have traded
   if (result === 'missed') reward = -1;
 
+  // Liquidation = massive negative reward
+  if (result === 'liquidation') reward = -100;
+
   return round(reward, 2);
+}
+
+/**
+ * CRITICAL: Learn from liquidation event
+ * This creates extremely strong negative associations
+ */
+function learnFromLiquidation(liquidationData) {
+  const {
+    symbol,
+    indicators,
+    entryPrice,
+    liquidationPrice,
+    direction,
+    fundingRate,
+    volumeAtEntry,
+    timestamp
+  } = liquidationData;
+
+  console.log(`🚨 [AI LEARN] CRITICAL LEARNING: Liquidation on ${symbol}`);
+
+  // Record liquidation
+  learningState.totalLiquidations++;
+  learningState.liquidations.push({
+    symbol,
+    timestamp,
+    direction,
+    entryPrice,
+    liquidationPrice,
+    fundingRate,
+    state: createState(indicators)
+  });
+
+  // Keep only last 50 liquidations
+  if (learningState.liquidations.length > 50) {
+    learningState.liquidations = learningState.liquidations.slice(-50);
+  }
+
+  // Learn from the state that led to liquidation
+  const state = createState(indicators);
+  const action = direction === 'long' ? 'LONG' : 'SHORT';
+
+  // MASSIVE negative Q-value update
+  updateQValue(state, action, -100, state);
+
+  // Track dangerous conditions
+  if (!learningState.dangerousConditions[state]) {
+    learningState.dangerousConditions[state] = { liquidations: 0, symbols: [] };
+  }
+  learningState.dangerousConditions[state].liquidations++;
+  learningState.dangerousConditions[state].symbols.push(symbol);
+
+  // Track specific bad entry conditions
+  if (fundingRate && Math.abs(fundingRate) > 0.001) {
+    learningState.badEntryConditions.highFunding.count++;
+    learningState.badEntryConditions.highFunding.losses++;
+    console.log(`[AI LEARN] High funding (${(fundingRate * 100).toFixed(3)}%) led to liquidation`);
+  }
+
+  if (indicators?.rsi > 70 && direction === 'long') {
+    learningState.badEntryConditions.overboughtEntry.count++;
+    learningState.badEntryConditions.overboughtEntry.losses++;
+    console.log(`[AI LEARN] Overbought entry (RSI: ${indicators.rsi.toFixed(1)}) led to liquidation`);
+  }
+
+  if (indicators?.rsi < 30 && direction === 'short') {
+    learningState.badEntryConditions.oversoldEntry.count++;
+    learningState.badEntryConditions.oversoldEntry.losses++;
+    console.log(`[AI LEARN] Oversold entry (RSI: ${indicators.rsi.toFixed(1)}) led to liquidation`);
+  }
+
+  if (indicators?.trend?.direction?.includes('DOWN') && direction === 'long') {
+    learningState.badEntryConditions.againstTrend.count++;
+    learningState.badEntryConditions.againstTrend.losses++;
+    console.log(`[AI LEARN] Entry against trend led to liquidation`);
+  }
+
+  if (indicators?.trend?.direction?.includes('UP') && direction === 'short') {
+    learningState.badEntryConditions.againstTrend.count++;
+    learningState.badEntryConditions.againstTrend.losses++;
+    console.log(`[AI LEARN] Entry against trend led to liquidation`);
+  }
+
+  // Save immediately after liquidation learning
+  saveLearningData();
+
+  return {
+    learned: true,
+    severity: 'CRITICAL',
+    state,
+    qValueNow: getQValue(state, action),
+    message: `Liquidation on ${symbol} recorded. State "${state}" now has strong negative association.`
+  };
+}
+
+/**
+ * Learn from severe loss (> 5%)
+ */
+function learnFromSevereLoss(lossData) {
+  const { symbol, pnlPercent, indicators, direction } = lossData;
+
+  console.log(`⚠️ [AI LEARN] Severe loss on ${symbol}: ${pnlPercent.toFixed(1)}%`);
+
+  // Track worst loss
+  if (pnlPercent < learningState.worstLoss) {
+    learningState.worstLoss = pnlPercent;
+  }
+
+  // Record severe loss
+  learningState.severeLosses.push({
+    symbol,
+    pnlPercent,
+    timestamp: Date.now(),
+    state: createState(indicators)
+  });
+
+  // Keep only last 100 severe losses
+  if (learningState.severeLosses.length > 100) {
+    learningState.severeLosses = learningState.severeLosses.slice(-100);
+  }
+
+  // Update Q-value with severity-weighted penalty
+  const state = createState(indicators);
+  const action = direction === 'long' ? 'LONG' : 'SHORT';
+  const severity = Math.abs(pnlPercent) / 5; // 10% loss = 2x penalty
+  updateQValue(state, action, pnlPercent * severity, state);
+
+  return { learned: true, severity: pnlPercent < -10 ? 'HIGH' : 'MEDIUM' };
+}
+
+/**
+ * CRITICAL: Analyze what went wrong in a trade
+ * Detects specific failure patterns for learning
+ */
+function analyzeTradeFailure(tradeData) {
+  const {
+    symbol,
+    direction,
+    entryPrice,
+    exitPrice,
+    pnlPercent,
+    entryIndicators,
+    exitIndicators,
+    holdTime
+  } = tradeData;
+
+  const failures = [];
+
+  // 1. FAKEOUT DETECTION
+  // Entered on breakout but price reversed quickly (within 30 min to 2 hours)
+  if (entryIndicators?.breakout?.detected && holdTime < 2 * 60 * 60 * 1000 && pnlPercent < -2) {
+    failures.push({
+      type: 'fakeout',
+      confidence: 0.8,
+      details: `Breakout ${entryIndicators.breakout.direction} failed within ${Math.round(holdTime / 60000)} min`
+    });
+    learningState.failurePatterns.fakeout.count++;
+    learningState.failurePatterns.fakeout.symbols.push(symbol);
+    console.log(`📊 [LEARN] FAKEOUT detected on ${symbol}: Breakout failed`);
+  }
+
+  // 2. RESISTANCE REJECTION
+  // Bought near resistance and got rejected
+  if (direction === 'long' && entryIndicators?.resistance) {
+    const distToResistance = (entryIndicators.resistance - entryPrice) / entryPrice * 100;
+    if (distToResistance < 1.5 && pnlPercent < -2) {
+      failures.push({
+        type: 'resistanceReject',
+        confidence: 0.85,
+        details: `Entered LONG only ${distToResistance.toFixed(1)}% below resistance`
+      });
+      learningState.failurePatterns.resistanceReject.count++;
+      learningState.failurePatterns.resistanceReject.symbols.push(symbol);
+      console.log(`📊 [LEARN] RESISTANCE REJECTION on ${symbol}`);
+    }
+  }
+
+  // 3. SUPPORT REJECTION
+  // Shorted near support and got bounced
+  if (direction === 'short' && entryIndicators?.support) {
+    const distToSupport = (entryPrice - entryIndicators.support) / entryPrice * 100;
+    if (distToSupport < 1.5 && pnlPercent < -2) {
+      failures.push({
+        type: 'supportReject',
+        confidence: 0.85,
+        details: `Entered SHORT only ${distToSupport.toFixed(1)}% above support`
+      });
+      learningState.failurePatterns.supportReject.count++;
+      learningState.failurePatterns.supportReject.symbols.push(symbol);
+      console.log(`📊 [LEARN] SUPPORT REJECTION on ${symbol}`);
+    }
+  }
+
+  // 4. LATE TREND ENTRY
+  // RSI already extreme, trend exhausted
+  if ((direction === 'long' && entryIndicators?.rsi > 65) ||
+      (direction === 'short' && entryIndicators?.rsi < 35)) {
+    failures.push({
+      type: 'lateTrend',
+      confidence: 0.75,
+      details: `RSI was already ${entryIndicators.rsi.toFixed(0)} at entry (trend exhausted)`
+    });
+    learningState.failurePatterns.lateTrend.count++;
+    learningState.failurePatterns.lateTrend.symbols.push(symbol);
+    console.log(`📊 [LEARN] LATE TREND ENTRY on ${symbol}: RSI ${entryIndicators.rsi.toFixed(0)}`);
+  }
+
+  // 5. VOLUME TRAP
+  // High volume at entry but was distribution (longs) or accumulation (shorts)
+  if (entryIndicators?.volumeSpike && entryIndicators?.sniperSignals?.volumeAccumulation?.detected) {
+    const accumDir = entryIndicators.sniperSignals.volumeAccumulation.direction;
+    if ((direction === 'long' && accumDir === 'bearish') ||
+        (direction === 'short' && accumDir === 'bullish')) {
+      failures.push({
+        type: 'volumeTrap',
+        confidence: 0.9,
+        details: `Volume spike was ${accumDir} accumulation (against position)`
+      });
+      learningState.failurePatterns.volumeTrap.count++;
+      learningState.failurePatterns.volumeTrap.symbols.push(symbol);
+      console.log(`📊 [LEARN] VOLUME TRAP on ${symbol}: ${accumDir} accumulation`);
+    }
+  }
+
+  // 6. DIVERGENCE IGNORED
+  // Entered despite divergence warning
+  if (entryIndicators?.sniperSignals?.divergence?.detected) {
+    const divType = entryIndicators.sniperSignals.divergence.type;
+    if ((direction === 'long' && divType === 'bearish') ||
+        (direction === 'short' && divType === 'bullish')) {
+      failures.push({
+        type: 'divergenceIgnored',
+        confidence: 0.85,
+        details: `Ignored ${divType} divergence warning at entry`
+      });
+      learningState.failurePatterns.divergenceIgnored.count++;
+      learningState.failurePatterns.divergenceIgnored.symbols.push(symbol);
+      console.log(`📊 [LEARN] DIVERGENCE IGNORED on ${symbol}: ${divType}`);
+    }
+  }
+
+  // 7. LIQUIDITY GRAB / STOP HUNT
+  // Price spiked against position then reversed (we got stopped before the move)
+  if (exitIndicators && entryIndicators) {
+    const priceMovedAgainst = direction === 'long'
+      ? (entryPrice - exitPrice) / entryPrice * 100
+      : (exitPrice - entryPrice) / entryPrice * 100;
+
+    // If we got stopped and then price would have been profitable
+    if (pnlPercent < -3 && holdTime < 60 * 60 * 1000) { // Lost > 3% within 1 hour
+      failures.push({
+        type: 'liquidationHunt',
+        confidence: 0.7,
+        details: `Quick stop-out (${Math.round(holdTime / 60000)} min), possible liquidity grab`
+      });
+      learningState.failurePatterns.liquidationHunt.count++;
+      learningState.failurePatterns.liquidationHunt.symbols.push(symbol);
+      console.log(`📊 [LEARN] LIQUIDITY GRAB on ${symbol}: Stopped within ${Math.round(holdTime / 60000)} min`);
+    }
+  }
+
+  // 8. OVERLEVERAGED MARKET (Extreme Funding)
+  if (entryIndicators?.fundingRate) {
+    const rate = entryIndicators.fundingRate;
+    if ((direction === 'long' && rate > 0.001) || (direction === 'short' && rate < -0.001)) {
+      failures.push({
+        type: 'overleveraged',
+        confidence: 0.8,
+        details: `Funding was ${(rate * 100).toFixed(3)}% (overleveraged ${direction === 'long' ? 'longs' : 'shorts'})`
+      });
+      learningState.failurePatterns.overleveraged.count++;
+      learningState.failurePatterns.overleveraged.symbols.push(symbol);
+      console.log(`📊 [LEARN] OVERLEVERAGED on ${symbol}: Funding ${(rate * 100).toFixed(3)}%`);
+    }
+  }
+
+  // Store this trade sequence for pattern learning
+  learningState.tradeSequences.push({
+    symbol,
+    direction,
+    pnlPercent,
+    holdTime,
+    failures: failures.map(f => f.type),
+    timestamp: Date.now(),
+    entryState: createState(entryIndicators),
+    exitState: exitIndicators ? createState(exitIndicators) : null
+  });
+
+  // Keep only last 100 sequences
+  if (learningState.tradeSequences.length > 100) {
+    learningState.tradeSequences = learningState.tradeSequences.slice(-100);
+  }
+
+  return failures;
+}
+
+/**
+ * Check if current entry would match known failure patterns
+ */
+function checkFailurePatternRisk(symbol, direction, indicators) {
+  const risks = [];
+
+  // Check fakeout risk
+  if (indicators?.breakout?.detected) {
+    const fakeoutRate = learningState.failurePatterns.fakeout.count > 5
+      ? learningState.failurePatterns.fakeout.count / Math.max(learningState.totalLearnings, 1)
+      : 0;
+    if (fakeoutRate > 0.15) {
+      risks.push({ pattern: 'fakeout', risk: 'high', reason: 'Breakouts have high fakeout rate' });
+    }
+  }
+
+  // Check resistance risk for longs
+  if (direction === 'long' && indicators?.resistance) {
+    const distToResistance = (indicators.resistance - indicators.currentPrice) / indicators.currentPrice * 100;
+    if (distToResistance < 1.5 && learningState.failurePatterns.resistanceReject.count > 3) {
+      risks.push({ pattern: 'resistanceReject', risk: 'high', reason: `Only ${distToResistance.toFixed(1)}% to resistance` });
+    }
+  }
+
+  // Check support risk for shorts
+  if (direction === 'short' && indicators?.support) {
+    const distToSupport = (indicators.currentPrice - indicators.support) / indicators.currentPrice * 100;
+    if (distToSupport < 1.5 && learningState.failurePatterns.supportReject.count > 3) {
+      risks.push({ pattern: 'supportReject', risk: 'high', reason: `Only ${distToSupport.toFixed(1)}% to support` });
+    }
+  }
+
+  // Check late trend risk
+  if ((direction === 'long' && indicators?.rsi > 65) || (direction === 'short' && indicators?.rsi < 35)) {
+    if (learningState.failurePatterns.lateTrend.count > 3) {
+      risks.push({ pattern: 'lateTrend', risk: 'medium', reason: `RSI ${indicators.rsi.toFixed(0)} suggests late entry` });
+    }
+  }
+
+  // Check divergence warning
+  if (indicators?.sniperSignals?.divergence?.detected) {
+    const divType = indicators.sniperSignals.divergence.type;
+    if ((direction === 'long' && divType === 'bearish') || (direction === 'short' && divType === 'bullish')) {
+      if (learningState.failurePatterns.divergenceIgnored.count > 2) {
+        risks.push({ pattern: 'divergenceIgnored', risk: 'high', reason: `${divType} divergence detected` });
+      }
+    }
+  }
+
+  // Check funding rate risk
+  if (indicators?.fundingRate) {
+    const rate = indicators.fundingRate;
+    if ((direction === 'long' && rate > 0.0008) || (direction === 'short' && rate < -0.0008)) {
+      risks.push({ pattern: 'overleveraged', risk: 'high', reason: `Extreme funding ${(rate * 100).toFixed(3)}%` });
+    }
+  }
+
+  return {
+    hasRisk: risks.length > 0,
+    highRisk: risks.some(r => r.risk === 'high'),
+    risks,
+    recommendation: risks.length > 2 ? 'AVOID' : risks.some(r => r.risk === 'high') ? 'CAUTION' : 'OK'
+  };
+}
+
+/**
+ * Get failure pattern statistics for dashboard
+ */
+function getFailurePatternStats() {
+  const stats = {};
+  for (const [pattern, data] of Object.entries(learningState.failurePatterns)) {
+    stats[pattern] = {
+      count: data.count,
+      description: data.description,
+      recentSymbols: data.symbols.slice(-5)
+    };
+  }
+  return stats;
+}
+
+/**
+ * Check if current conditions are dangerous based on past liquidations
+ */
+function isDangerousCondition(indicators) {
+  const state = createState(indicators);
+
+  // Check if this state has led to liquidations before
+  if (learningState.dangerousConditions[state]) {
+    const danger = learningState.dangerousConditions[state];
+    if (danger.liquidations >= 1) {
+      return {
+        dangerous: true,
+        reason: `State "${state}" has caused ${danger.liquidations} liquidation(s)`,
+        liquidations: danger.liquidations
+      };
+    }
+  }
+
+  // Check Q-values - if very negative, it's dangerous
+  const qLong = getQValue(state, 'LONG');
+  const qShort = getQValue(state, 'SHORT');
+
+  if (qLong < -20 || qShort < -20) {
+    return {
+      dangerous: true,
+      reason: `State has very negative Q-values (LONG: ${qLong.toFixed(1)}, SHORT: ${qShort.toFixed(1)})`,
+      qValues: { LONG: qLong, SHORT: qShort }
+    };
+  }
+
+  return { dangerous: false };
 }
 
 /**
@@ -678,6 +1123,12 @@ loadLearningData();
 module.exports = {
   detectMarketRegime,
   learnFromTrade,
+  learnFromLiquidation,
+  learnFromSevereLoss,
+  analyzeTradeFailure,
+  checkFailurePatternRisk,
+  getFailurePatternStats,
+  isDangerousCondition,
   getLearnedRecommendation,
   getOptimalTradingHours,
   getOptimalTradingDays,

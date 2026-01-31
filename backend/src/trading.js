@@ -1,7 +1,7 @@
 const axios = require('axios');
 const crypto = require('crypto');
 const { recordPattern, getStats: getPatternStats } = require('./patternMemory');
-const { learnFromTrade } = require('./aiLearning');
+const { learnFromTrade, learnFromLiquidation, learnFromSevereLoss, isDangerousCondition, analyzeTradeFailure, checkFailurePatternRisk } = require('./aiLearning');
 const { recordTrade: recordRiskTrade, checkTradingAllowed, calculatePositionSize: riskCalcPositionSize } = require('./riskManager');
 const { addTrainingSample } = require('./mlSignalGenerator');
 
@@ -293,6 +293,35 @@ async function executeTrade(signal) {
     }
   }
 
+  // === FAILURE PATTERN LEARNING CHECK ===
+  // Check if this entry matches known failure patterns from past trades
+  const direction = trade?.type === 'LONG' ? 'long' : 'short';
+  const failureRisk = checkFailurePatternRisk(signal.symbol, direction, indicators);
+
+  if (failureRisk.recommendation === 'AVOID') {
+    const reasons = failureRisk.risks.map(r => r.reason).join(', ');
+    console.log(`⚠️ [LEARN] BLOCKED ${signal.symbol}: Matches ${failureRisk.risks.length} failure patterns - ${reasons}`);
+    return {
+      executed: false,
+      reason: `Blocked by learning: ${reasons}`,
+      failurePatterns: failureRisk.risks.map(r => r.pattern)
+    };
+  }
+
+  if (failureRisk.recommendation === 'CAUTION' && failureRisk.highRisk) {
+    // High risk pattern - require higher confidence (additional 10%)
+    const cautionThreshold = effectiveThreshold + 0.10;
+    if (confidence < cautionThreshold) {
+      const reasons = failureRisk.risks.map(r => r.reason).join(', ');
+      console.log(`⚠️ [LEARN] CAUTION ${signal.symbol}: ${reasons} - needs ${(cautionThreshold * 100).toFixed(0)}% confidence`);
+      return {
+        executed: false,
+        reason: `High-risk pattern (${reasons}) requires ${(cautionThreshold * 100).toFixed(0)}% confidence, got ${(confidence * 100).toFixed(0)}%`,
+        failurePatterns: failureRisk.risks.map(r => r.pattern)
+      };
+    }
+  }
+
   // Check daily trade limit
   const today = new Date().toDateString();
   if (dailyTrades.date !== today) {
@@ -478,7 +507,7 @@ async function executeTrade(signal) {
   }
 }
 
-async function closePosition(symbol, reason = 'manual', currentPrice = null) {
+async function closePosition(symbol, reason = 'manual', currentPrice = null, exitIndicators = null) {
   const position = openPositions.get(symbol);
   if (!position) {
     return { closed: false, reason: 'No position found' };
@@ -536,8 +565,52 @@ async function closePosition(symbol, reason = 'manual', currentPrice = null) {
         symbol,
         timestamp: Date.now()
       });
+
+      // CRITICAL: Learn from severe losses
+      if (pnlPercent <= -5) {
+        learnFromSevereLoss({
+          symbol,
+          pnlPercent,
+          indicators: position.signal?.indicators,
+          direction: position.side?.toLowerCase()
+        });
+      }
+
+      // CRITICAL: Learn from liquidation-level losses
+      if (pnlPercent <= -15 || reason.includes('LIQUIDATION') || reason.includes('EMERGENCY')) {
+        learnFromLiquidation({
+          symbol,
+          indicators: position.signal?.indicators,
+          entryPrice: position.entryPrice,
+          liquidationPrice: position.liquidationPrice,
+          direction: position.side?.toLowerCase(),
+          fundingRate: position.signal?.indicators?.fundingRate || null,
+          volumeAtEntry: position.signal?.indicators?.volume || null,
+          timestamp: Date.now()
+        });
+      }
+
+      // CRITICAL: Analyze failure patterns for ALL losses > 2%
+      // This learns what specific mistakes were made (fakeout, resistance reject, etc.)
+      if (result === 'loss' && pnlPercent <= -2) {
+        const failures = analyzeTradeFailure({
+          symbol,
+          direction: position.side?.toLowerCase(),
+          entryPrice: position.entryPrice,
+          exitPrice: currentPrice,
+          pnlPercent,
+          entryIndicators: position.signal?.indicators,
+          exitIndicators: exitIndicators, // Current indicators passed from monitorPosition
+          holdTime: Date.now() - position.openTime
+        });
+
+        if (failures.length > 0) {
+          console.log(`📊 [LEARN] ${symbol} failure patterns detected: ${failures.map(f => f.type).join(', ')}`);
+        }
+      }
     } catch (e) {
       // AI learning might not be loaded
+      console.warn('[TRADING] Learning error:', e.message);
     }
 
     // Record for risk management
@@ -655,7 +728,7 @@ async function monitorPosition(symbol, currentSignal) {
 
   if (shouldClose) {
     console.log(`EMERGENCY EXIT: Closing ${symbol} - ${closeReason}`);
-    const result = await closePosition(symbol, closeReason, currentPrice);
+    const result = await closePosition(symbol, closeReason, currentPrice, currentSignal?.indicators);
     return { closed: true, symbol, reason: closeReason, emergency: true };
   }
 
@@ -811,7 +884,7 @@ async function monitorPosition(symbol, currentSignal) {
   if (shouldClose) {
     console.log(`SMART EXIT: Closing ${symbol} - ${closeReason}`);
     const currentPrice = currentSignal?.indicators?.currentPrice;
-    const result = await closePosition(symbol, closeReason, currentPrice);
+    const result = await closePosition(symbol, closeReason, currentPrice, currentSignal?.indicators);
 
     // Update trade history
     const historyEntry = tradeHistory.find(t => t.symbol === symbol && t.status === 'OPENED');
