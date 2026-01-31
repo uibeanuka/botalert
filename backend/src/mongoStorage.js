@@ -24,7 +24,12 @@ const COLLECTIONS = {
   ENTRY_CONDITIONS: 'entry_conditions',
   FAILURE_PATTERNS: 'failure_patterns',
   MARKET_SNAPSHOTS: 'market_snapshots',
-  DAILY_STATS: 'daily_stats'
+  DAILY_STATS: 'daily_stats',
+  // Historical learning
+  HISTORICAL_LEARNING: 'historical_learning',
+  HISTORICAL_TRADES: 'historical_trades',
+  MARKET_EVENTS: 'market_events',
+  LEARNING_SUMMARIES: 'learning_summaries'
 };
 
 /**
@@ -91,6 +96,15 @@ async function createIndexes() {
 
     // Daily stats
     await db.collection(COLLECTIONS.DAILY_STATS).createIndex({ date: -1 });
+
+    // Historical learning
+    await db.collection(COLLECTIONS.HISTORICAL_LEARNING).createIndex({ symbol: 1, interval: 1 });
+    await db.collection(COLLECTIONS.HISTORICAL_LEARNING).createIndex({ winRate: -1 });
+    await db.collection(COLLECTIONS.HISTORICAL_TRADES).createIndex({ symbol: 1, entryTime: -1 });
+    await db.collection(COLLECTIONS.HISTORICAL_TRADES).createIndex({ result: 1 });
+    await db.collection(COLLECTIONS.MARKET_EVENTS).createIndex({ symbol: 1, timestamp: -1 });
+    await db.collection(COLLECTIONS.MARKET_EVENTS).createIndex({ type: 1 });
+    await db.collection(COLLECTIONS.LEARNING_SUMMARIES).createIndex({ type: 1, completedAt: -1 });
   } catch (err) {
     console.warn('[MONGO] Index creation warning:', err.message);
   }
@@ -662,6 +676,279 @@ async function getAllInsights() {
   }
 }
 
+// ============================================================
+// HISTORICAL LEARNING
+// ============================================================
+
+/**
+ * Store historical learning results
+ */
+async function storeHistoricalLearning(learning) {
+  if (!isAvailable()) return false;
+
+  try {
+    await db.collection(COLLECTIONS.HISTORICAL_LEARNING).updateOne(
+      { symbol: learning.symbol, interval: learning.interval },
+      {
+        $set: {
+          ...learning,
+          updatedAt: new Date()
+        }
+      },
+      { upsert: true }
+    );
+    return true;
+  } catch (err) {
+    console.error('[MONGO] Store historical learning error:', err.message);
+    return false;
+  }
+}
+
+/**
+ * Store historical trades (batch)
+ */
+async function storeHistoricalTrades(trades) {
+  if (!isAvailable() || trades.length === 0) return false;
+
+  try {
+    // Use bulk write for efficiency
+    const ops = trades.map(trade => ({
+      insertOne: {
+        document: {
+          ...trade,
+          createdAt: new Date()
+        }
+      }
+    }));
+
+    await db.collection(COLLECTIONS.HISTORICAL_TRADES).bulkWrite(ops, { ordered: false });
+    return true;
+  } catch (err) {
+    console.error('[MONGO] Store historical trades error:', err.message);
+    return false;
+  }
+}
+
+/**
+ * Store market events (flash crashes, pumps, etc.)
+ */
+async function storeMarketEvents(symbol, events) {
+  if (!isAvailable() || events.length === 0) return false;
+
+  try {
+    const docs = events.map(e => ({
+      ...e,
+      symbol,
+      createdAt: new Date()
+    }));
+
+    await db.collection(COLLECTIONS.MARKET_EVENTS).insertMany(docs);
+    return true;
+  } catch (err) {
+    console.error('[MONGO] Store market events error:', err.message);
+    return false;
+  }
+}
+
+/**
+ * Store learning summary
+ */
+async function storeLearningSummary(summary) {
+  if (!isAvailable()) return false;
+
+  try {
+    await db.collection(COLLECTIONS.LEARNING_SUMMARIES).insertOne({
+      ...summary,
+      createdAt: new Date()
+    });
+    return true;
+  } catch (err) {
+    console.error('[MONGO] Store learning summary error:', err.message);
+    return false;
+  }
+}
+
+/**
+ * Get historical insights
+ */
+async function getHistoricalInsights() {
+  if (!isAvailable()) return null;
+
+  try {
+    // Get all historical learnings
+    const learnings = await db.collection(COLLECTIONS.HISTORICAL_LEARNING)
+      .find()
+      .sort({ winRate: -1 })
+      .toArray();
+
+    // Get market events summary
+    const eventsPipeline = [
+      {
+        $group: {
+          _id: '$type',
+          count: { $sum: 1 },
+          avgChange: { $avg: '$change' },
+          symbols: { $addToSet: '$symbol' }
+        }
+      }
+    ];
+    const eventsSummary = await db.collection(COLLECTIONS.MARKET_EVENTS)
+      .aggregate(eventsPipeline)
+      .toArray();
+
+    // Get condition performance across all historical data
+    const conditionsPipeline = [
+      { $unwind: '$conditionPerformance' },
+      {
+        $group: {
+          _id: '$conditionPerformance.k',
+          totalTrades: { $sum: '$conditionPerformance.v.trades' },
+          totalWins: { $sum: '$conditionPerformance.v.wins' },
+          totalPnl: { $sum: '$conditionPerformance.v.totalPnl' }
+        }
+      },
+      {
+        $addFields: {
+          winRate: { $multiply: [{ $divide: ['$totalWins', '$totalTrades'] }, 100] }
+        }
+      },
+      { $sort: { winRate: -1 } },
+      { $limit: 20 }
+    ];
+
+    // Best performing symbols from history
+    const topSymbols = learnings
+      .filter(l => l.totalTrades >= 10)
+      .sort((a, b) => b.winRate - a.winRate)
+      .slice(0, 10);
+
+    // Worst performing to avoid
+    const worstSymbols = learnings
+      .filter(l => l.totalTrades >= 10)
+      .sort((a, b) => a.winRate - b.winRate)
+      .slice(0, 5);
+
+    // Get learning summaries
+    const summaries = await db.collection(COLLECTIONS.LEARNING_SUMMARIES)
+      .find()
+      .sort({ completedAt: -1 })
+      .limit(5)
+      .toArray();
+
+    // Calculate overall stats
+    let totalHistoricalTrades = 0;
+    let totalWins = 0;
+    let totalPnl = 0;
+
+    for (const l of learnings) {
+      totalHistoricalTrades += l.totalTrades || 0;
+      totalWins += l.wins || 0;
+      totalPnl += l.avgPnl * (l.totalTrades || 0);
+    }
+
+    return {
+      overview: {
+        totalSymbolsLearned: learnings.length,
+        totalHistoricalTrades,
+        overallWinRate: totalHistoricalTrades > 0 ? ((totalWins / totalHistoricalTrades) * 100).toFixed(1) : 0,
+        avgPnlPerTrade: totalHistoricalTrades > 0 ? (totalPnl / totalHistoricalTrades).toFixed(2) : 0
+      },
+      topSymbols,
+      worstSymbols,
+      marketEvents: eventsSummary,
+      recentLearning: summaries,
+      bestEntryConditions: learnings
+        .flatMap(l => Object.entries(l.conditionPerformance || {})
+          .filter(([, v]) => v.trades >= 5)
+          .map(([k, v]) => ({
+            condition: k,
+            winRate: v.trades > 0 ? ((v.wins / v.trades) * 100).toFixed(1) : 0,
+            avgPnl: v.trades > 0 ? (v.totalPnl / v.trades).toFixed(2) : 0,
+            trades: v.trades
+          })))
+        .sort((a, b) => b.winRate - a.winRate)
+        .slice(0, 15),
+      bestTradingHours: aggregateHourlyPerformance(learnings),
+      bestTradingDays: aggregateDayOfWeekPerformance(learnings)
+    };
+  } catch (err) {
+    console.error('[MONGO] Get historical insights error:', err.message);
+    return { error: err.message };
+  }
+}
+
+/**
+ * Aggregate hourly performance from all learnings
+ */
+function aggregateHourlyPerformance(learnings) {
+  const hourlyAgg = {};
+
+  for (const l of learnings) {
+    for (const [hour, perf] of Object.entries(l.hourlyPerformance || {})) {
+      if (!hourlyAgg[hour]) hourlyAgg[hour] = { trades: 0, wins: 0, pnl: 0 };
+      hourlyAgg[hour].trades += perf.trades || 0;
+      hourlyAgg[hour].wins += perf.wins || 0;
+      hourlyAgg[hour].pnl += perf.totalPnl || 0;
+    }
+  }
+
+  return Object.entries(hourlyAgg)
+    .map(([hour, data]) => ({
+      hour: parseInt(hour),
+      winRate: data.trades > 0 ? ((data.wins / data.trades) * 100).toFixed(1) : 0,
+      avgPnl: data.trades > 0 ? (data.pnl / data.trades).toFixed(2) : 0,
+      trades: data.trades
+    }))
+    .filter(h => h.trades >= 10)
+    .sort((a, b) => parseFloat(b.winRate) - parseFloat(a.winRate));
+}
+
+/**
+ * Aggregate day of week performance
+ */
+function aggregateDayOfWeekPerformance(learnings) {
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const dayAgg = {};
+
+  for (const l of learnings) {
+    for (const [day, perf] of Object.entries(l.dayOfWeekPerformance || {})) {
+      if (!dayAgg[day]) dayAgg[day] = { trades: 0, wins: 0, pnl: 0 };
+      dayAgg[day].trades += perf.trades || 0;
+      dayAgg[day].wins += perf.wins || 0;
+      dayAgg[day].pnl += perf.totalPnl || 0;
+    }
+  }
+
+  return Object.entries(dayAgg)
+    .map(([day, data]) => ({
+      day: dayNames[parseInt(day)] || day,
+      dayNum: parseInt(day),
+      winRate: data.trades > 0 ? ((data.wins / data.trades) * 100).toFixed(1) : 0,
+      avgPnl: data.trades > 0 ? (data.pnl / data.trades).toFixed(2) : 0,
+      trades: data.trades
+    }))
+    .filter(d => d.trades >= 10)
+    .sort((a, b) => parseFloat(b.winRate) - parseFloat(a.winRate));
+}
+
+/**
+ * Get recent market events
+ */
+async function getRecentMarketEvents(limit = 20) {
+  if (!isAvailable()) return [];
+
+  try {
+    return await db.collection(COLLECTIONS.MARKET_EVENTS)
+      .find()
+      .sort({ timestamp: -1 })
+      .limit(limit)
+      .toArray();
+  } catch (err) {
+    console.error('[MONGO] Get market events error:', err.message);
+    return [];
+  }
+}
+
 /**
  * Close connection
  */
@@ -710,6 +997,14 @@ module.exports = {
   // Daily stats
   updateDailyStats,
   getDailyStatsHistory,
+
+  // Historical learning
+  storeHistoricalLearning,
+  storeHistoricalTrades,
+  storeMarketEvents,
+  storeLearningSummary,
+  getHistoricalInsights,
+  getRecentMarketEvents,
 
   // Dashboard
   getAllInsights,

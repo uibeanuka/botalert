@@ -636,8 +636,19 @@ app.post('/api/simulation/reset', (_req, res) => {
 // === LEARNING INSIGHTS (MongoDB) ===
 app.get('/api/learning/insights', async (_req, res) => {
   try {
-    const insights = await mongo.getAllInsights();
-    res.json(insights);
+    const [realtimeInsights, historicalInsights] = await Promise.all([
+      mongo.getAllInsights(),
+      mongo.getHistoricalInsights()
+    ]);
+    res.json({
+      realtime: realtimeInsights,
+      historical: historicalInsights,
+      summary: {
+        hasRealtimeData: realtimeInsights?.connected && realtimeInsights?.realTrades?.totalTrades > 0,
+        hasHistoricalData: historicalInsights?.overview?.totalHistoricalTrades > 0,
+        totalLearnings: (realtimeInsights?.realTrades?.totalTrades || 0) + (historicalInsights?.overview?.totalHistoricalTrades || 0)
+      }
+    });
   } catch (error) {
     res.status(500).json({ error: 'Failed to get learning insights', message: error.message });
   }
@@ -700,6 +711,58 @@ app.get('/api/learning/daily-stats', async (req, res) => {
     res.json({ stats, days: stats.length });
   } catch (error) {
     res.status(500).json({ error: 'Failed to get daily stats', message: error.message });
+  }
+});
+
+// === HISTORICAL LEARNING - Learn from 2017+ data ===
+const { runHistoricalLearning, getProgress: getHistoricalProgress, getHistoricalInsights: getHistoricalLearningInsights } = require('./historicalDataLoader');
+
+// Start historical learning (runs in background)
+app.post('/api/historical/start', async (req, res) => {
+  try {
+    const options = req.body || {};
+    // Start learning in background
+    runHistoricalLearning(options).catch(err => {
+      console.error('[HISTORICAL] Background learning error:', err.message);
+    });
+    res.json({
+      started: true,
+      message: 'Historical learning started in background',
+      checkProgressAt: '/api/historical/progress'
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to start historical learning', message: error.message });
+  }
+});
+
+// Get historical learning progress
+app.get('/api/historical/progress', (_req, res) => {
+  try {
+    const progress = getHistoricalProgress();
+    res.json(progress);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get progress', message: error.message });
+  }
+});
+
+// Get historical insights (what was learned)
+app.get('/api/historical/insights', async (_req, res) => {
+  try {
+    const insights = await getHistoricalLearningInsights();
+    res.json(insights);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get historical insights', message: error.message });
+  }
+});
+
+// Get market events (flash crashes, pumps, etc.)
+app.get('/api/historical/events', async (req, res) => {
+  try {
+    const limit = Number(req.query.limit) || 20;
+    const events = await mongo.getRecentMarketEvents(limit);
+    res.json({ events, count: events.length });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get market events', message: error.message });
   }
 });
 
